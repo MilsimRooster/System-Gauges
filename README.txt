@@ -41,12 +41,17 @@ Keyboard:
 
 - `F1`: cycle Classic, Telemetry, and Hybrid display modes.
 
+Tray menu:
+
+- `Background Skin`: choose a preset dashboard background skin. The selected skin is saved to `%APPDATA%\SystemGauges\config.json`.
+
 ## Notes
 
 - GPU telemetry is NVIDIA-only.
 - SMART data is refreshed less often than CPU/GPU/RAM to avoid excessive disk queries.
 - Drive tiles intentionally show activity speed, temperature, and health only.
 - The `nvidia-ml-py` package is imported as `pynvml`; this is expected.
+- Custom background images are planned for a later pass; preset skins are intentionally subtle to preserve gauge readability.
 
 ## Build EXE
 

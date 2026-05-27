@@ -4,6 +4,8 @@ import re
 import subprocess
 import math
 import warnings
+import json
+import os
 from pathlib import Path
 import psutil
 import wmi
@@ -16,7 +18,7 @@ warnings.filterwarnings(
 import pynvml
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QRadialGradient, QBrush, QIcon
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -35,6 +37,16 @@ SMART_REFRESH_SECONDS = 4
 SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
 UNKNOWN_SMART = ("?", "N/A")
 SMART_DEBUG = False
+DEFAULT_SKIN = "graphite"
+
+SKINS = {
+    "graphite": {"name": "Graphite", "background": "#17191c", "panel": "#111a2a", "text": "#f3fbff", "hint": "#a9d8ff"},
+    "carbon": {"name": "Carbon Fiber", "background": "#101315", "panel": "#151d20", "text": "#f0fbf7", "hint": "#9fd6c7"},
+    "deep_navy": {"name": "Deep Navy", "background": "#111722", "panel": "#0d1d33", "text": "#f3f8ff", "hint": "#9ec9ff"},
+    "brushed_steel": {"name": "Brushed Steel", "background": "#202326", "panel": "#2b3035", "text": "#f6fbff", "hint": "#c5d6e3"},
+    "glass_green": {"name": "Glass Green", "background": "#101a17", "panel": "#0d241d", "text": "#f2fff9", "hint": "#91f0c2"},
+    "amber": {"name": "Amber Warning", "background": "#1b1711", "panel": "#2a1d0d", "text": "#fff7e8", "hint": "#ffd58b"},
+}
 
 
 def smart_log(message):
@@ -47,22 +59,62 @@ def resource_path(filename):
     return base_path / filename
 
 
-WINDOW_STYLE = """
-QWidget {
-    background: #17191c;
-    color: #f3fbff;
+def config_path():
+    appdata = os.getenv("APPDATA")
+    base_path = Path(appdata) if appdata else Path.home()
+    return base_path / "SystemGauges" / "config.json"
+
+
+def load_config():
+    path = config_path()
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Config load failed: {e}")
+    return {}
+
+
+def save_config(config):
+    path = config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"Config save failed: {e}")
+
+
+def skin_by_key(key):
+    return SKINS.get(key, SKINS[DEFAULT_SKIN])
+
+
+def window_style(skin):
+    return f"""
+QWidget {{
+    background: {skin["background"]};
+    color: {skin["text"]};
     font-family: "Segoe UI";
-}
-QScrollArea {
+}}
+QScrollArea {{
     border: 0;
     background: transparent;
-}
-QScrollBar:vertical, QScrollBar:horizontal {
+}}
+QScrollBar:vertical, QScrollBar:horizontal {{
     background: transparent;
     width: 0px;
     height: 0px;
-}
+}}
 """
+
+
+def hint_style(skin):
+    return f"""
+        color: {skin["hint"]};
+        font-size: 12px;
+        background: {skin["panel"]};
+        padding: 6px 10px;
+        border-radius: 3px;
+    """
 
 
 def run_command(cmd):
@@ -515,7 +567,12 @@ class Monitor(QWidget):
         super().__init__()
         self.setWindowTitle("System Gauges")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setStyleSheet(WINDOW_STYLE)
+        self.config = load_config()
+        self.current_skin_key = self.config.get("skin", DEFAULT_SKIN)
+        if self.current_skin_key not in SKINS:
+            self.current_skin_key = DEFAULT_SKIN
+        self.skin_actions = {}
+        self.apply_skin(save=False)
         self.app_icon = QIcon(str(resource_path("app.ico")))
         if not self.app_icon.isNull():
             self.setWindowIcon(self.app_icon)
@@ -549,13 +606,7 @@ class Monitor(QWidget):
         layout = QVBoxLayout(self)
 
         self.hint_label = QLabel("Press F1 to cycle display modes", self)
-        self.hint_label.setStyleSheet("""
-            color: #a9d8ff;
-            font-size: 12px;
-            background: #111a2a;
-            padding: 6px 10px;
-            border-radius: 3px;
-        """)
+        self.hint_label.setStyleSheet(hint_style(skin_by_key(self.current_skin_key)))
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.hint_label)
 
@@ -632,6 +683,20 @@ class Monitor(QWidget):
         menu.addAction(show)
         menu.addAction(hide)
         menu.addSeparator()
+
+        skin_menu = menu.addMenu("Background Skin")
+        self.skin_group = QActionGroup(self)
+        self.skin_group.setExclusive(True)
+        for key, skin in SKINS.items():
+            action = QAction(skin["name"], self)
+            action.setCheckable(True)
+            action.setChecked(key == self.current_skin_key)
+            action.triggered.connect(lambda checked=False, skin_key=key: self.set_skin(skin_key))
+            self.skin_group.addAction(action)
+            skin_menu.addAction(action)
+            self.skin_actions[key] = action
+
+        menu.addSeparator()
         menu.addAction(exit)
 
         self.tray.setContextMenu(menu)
@@ -649,6 +714,25 @@ class Monitor(QWidget):
         self._sync_modes()
 
         QTimer.singleShot(800, self._force_focus)
+
+    def apply_skin(self, save=True):
+        skin = skin_by_key(self.current_skin_key)
+        self.setStyleSheet(window_style(skin))
+        if hasattr(self, "hint_label"):
+            self.hint_label.setStyleSheet(hint_style(skin))
+        if hasattr(self, "skin_actions"):
+            for key, action in self.skin_actions.items():
+                action.setChecked(key == self.current_skin_key)
+        if save:
+            self.config["skin"] = self.current_skin_key
+            save_config(self.config)
+
+    def set_skin(self, skin_key):
+        if skin_key not in SKINS:
+            return
+        self.current_skin_key = skin_key
+        self.apply_skin(save=True)
+        self.update()
 
     def _force_focus(self):
         self.activateWindow()
