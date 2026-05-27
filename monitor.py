@@ -2,12 +2,20 @@ import sys
 import time
 import re
 import subprocess
+import math
+import warnings
 import psutil
 import wmi
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"The pynvml package is deprecated.*",
+    category=FutureWarning,
+)
 import pynvml
 
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QRadialGradient
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QRadialGradient, QBrush
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -16,38 +24,73 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QSystemTrayIcon,
     QMenu,
-    QStyle
+    QStyle,
+    QLabel,
+    QSizePolicy
 )
 
-REFRESH_MS = 400
-SMART_REFRESH_SECONDS = 8
+REFRESH_MS = 150
+SMART_REFRESH_SECONDS = 4
+SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
+UNKNOWN_SMART = ("?", "N/A")
+SMART_DEBUG = False
 
 
-# -------------------------
-# Utilities
-# -------------------------
+def smart_log(message):
+    if SMART_DEBUG:
+        print(message)
+
+
+WINDOW_STYLE = """
+QWidget {
+    background: #17191c;
+    color: #f3fbff;
+    font-family: "Segoe UI";
+}
+QScrollArea {
+    border: 0;
+    background: transparent;
+}
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: transparent;
+    width: 0px;
+    height: 0px;
+}
+"""
+
 
 def run_command(cmd):
     try:
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-        return subprocess.check_output(
+        result = subprocess.run(
             cmd,
             text=True,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             startupinfo=startup,
-            creationflags=subprocess.CREATE_NO_WINDOW
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=8
         )
-    except:
+        return (result.stdout or "") + (result.stderr or "")
+    except subprocess.TimeoutExpired:
+        return ""
+    except Exception as e:
+        print(f"Command failed: {' '.join(cmd)} | Error: {e}")
         return ""
 
 
 def c_to_f(c):
     try:
-        return int((int(c) * 9 / 5) + 32)
-    except:
-        return "?"
+        return int((float(c) * 9 / 5) + 32)
+    except (TypeError, ValueError):
+        return "?" 
+
+
+def format_temp(c):
+    f = c_to_f(c)
+    return f"Temp {f}°F" if f != "?" else "Temp N/A"
 
 
 def format_speed(v):
@@ -58,376 +101,520 @@ def format_speed(v):
     kb = v * 1024
     if kb >= 1:
         return f"{kb:.0f} KB/s"
-    return "0 MB/s"
+    return "0 B/s"
 
 
-# -------------------------
-# SMART parsing
-# -------------------------
+# ====================== SMART ======================
+def smartctl_exists():
+    try:
+        result = subprocess.run(
+            [SMARTCTL_PATH, "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=4
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
-def run_smartctl(device, dtype=None):
 
+def parse_smart(device, dtype="nvme"):
+    smart_log(f"Attempting SMART on {device} with type {dtype}")
     attempts = []
-    attempts.append(["smartctl", "-a", device])
-
     if dtype:
-        attempts.append(["smartctl", "-a", "-d", dtype, device])
-
-    attempts.append(["smartctl", "-a", "-d", "ata", device])
-    attempts.append(["smartctl", "-a", "-d", "sat", device])
+        attempts.append([SMARTCTL_PATH, "-a", "-d", dtype, device])
+    attempts.append([SMARTCTL_PATH, "-a", device])
+    if dtype != "nvme":
+        attempts.append([SMARTCTL_PATH, "-a", "-d", "nvme", device])
 
     for cmd in attempts:
-
         data = run_command(cmd)
+        smart_log(f"  -> Got {len(data)} characters")
+        if data and "SMART support is: Unavailable" not in data:
+            # Temperature
+            temp = "?"
+            m = re.search(r"(?:Temperature|Current Drive Temperature):\s+(\d+)", data, re.IGNORECASE)
+            if not m:
+                m = re.search(r"Temperature_Celsius.*?-\s+(\d+)", data, re.IGNORECASE)
+            if not m:
+                m = re.search(r"Airflow_Temperature_Cel.*?-\s+(\d+)", data, re.IGNORECASE)
+            if m:
+                temp = m.group(1)
 
-        if data and ("SMART" in data or "Temperature:" in data):
-            return data
+            # Health
+            health = "?"
+            if re.search(r"(PASSED|OK)", data, re.IGNORECASE):
+                health = "100%"
+            m = re.search(r"Percentage Used:\s+(\d+)%", data, re.IGNORECASE)
+            if m:
+                health = f"{100 - int(m.group(1))}%"
+            m = re.search(r"Remaining_Lifetime_Perc.*?\s(\d+)(?:\s|$)", data, re.IGNORECASE)
+            if m:
+                health = f"{int(m.group(1))}%"
+            m = re.search(r"Media_Wearout_Indicator.*?\s(\d+)(?:\s|$)", data, re.IGNORECASE)
+            if m:
+                health = f"{int(m.group(1))}%"
 
-    return ""
+            smart_log(f"  SMART Success on {device} | Temp: {temp}")
+            return temp, health
 
-
-def parse_temperature_from_ata(data):
-
-    for line in data.splitlines():
-
-        if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
-
-            nums = re.findall(r"\d+", line)
-
-            if nums:
-                return nums[-1]
-
-    return "?"
-
-
-def parse_lba_written(data):
-
-    for line in data.splitlines():
-
-        if "Total_LBAs_Written" in line:
-
-            nums = re.findall(r"\d+", line)
-
-            if nums:
-                return int(nums[-1])
-
-    return None
+    smart_log(f"  All attempts failed for {device}")
+    return UNKNOWN_SMART
 
 
-def parse_smart(device, dtype=None):
+def detect_smart():
+    print("=== Scanning for Drives ===")
+    devices = []
+    if not smartctl_exists():
+        print(f"smartctl not found or not runnable: {SMARTCTL_PATH}")
+        return devices
 
-    data = run_smartctl(device, dtype)
+    scan = run_command([SMARTCTL_PATH, "--scan-open"])
+    for line in scan.splitlines():
+        m = re.match(r"(\S+)\s+-d\s+(\S+)", line)
+        if m and ("PHYSICALDRIVE" in m.group(1).upper() or re.match(r"/dev/sd[a-z]+", m.group(1), re.IGNORECASE)):
+            device = m.group(1)
+            dtype = m.group(2).split(",")[0]
+            devices.append((device, dtype))
+            print(f"Detected: {device} ({dtype})")
 
-    temp = "?"
-    health = "?"
-    written = "?"
+    if devices:
+        return sorted(devices, key=lambda item: physicaldrive_index(item[0]))
 
-    if not data:
-        return temp, health, written
+    for i in range(8):
+        dev = f"\\\\.\\PHYSICALDRIVE{i}"
+        for dtype in ("nvme", "sat", None):
+            cmd = [SMARTCTL_PATH, "-i", dev] if dtype is None else [SMARTCTL_PATH, "-i", "-d", dtype, dev]
+            data = run_command(cmd)
+            if data and re.search(r"(Device Model|Model Number|SMART support)", data, re.IGNORECASE):
+                devices.append((dev, dtype))
+                print(f"Detected: {dev} ({dtype or 'auto'})")
+                break
+    return devices
 
-    m = re.search(r"Temperature:\s+(\d+)", data)
 
+def physicaldrive_index(device_id):
+    m = re.search(r"PHYSICALDRIVE(\d+)", device_id or "", re.IGNORECASE)
     if m:
-        temp = m.group(1)
+        return int(m.group(1))
 
-    if temp == "?":
-        temp = parse_temperature_from_ata(data)
-
-    m = re.search(r"Percentage Used:\s+(\d+)%", data)
-
+    m = re.search(r"/dev/sd([a-z]+)", device_id or "", re.IGNORECASE)
     if m:
-        used = int(m.group(1))
-        health = f"{100-used}%"
+        value = 0
+        for char in m.group(1).lower():
+            value = (value * 26) + (ord(char) - ord("a") + 1)
+        return value - 1
 
-    if health == "?" and "PASSED" in data:
-        health = "100%"
+    return 9999
 
-    # Primary: Data Units Written (common on NVMe / many modern SSDs)
-    m = re.search(r"Data Units Written:\s+([\d,]+)", data)
-    if m:
-        units = int(m.group(1).replace(",", ""))
-        tb = (units * 512000) / (1024**4)  # 1000-based units × 512 bytes
-        written = f"{tb:.2f} TB"
-
-    # Fallback 1: Total_LBAs_Written (common on many SATA SSDs)
-    if written == "?":
-        lbas = parse_lba_written(data)
-        if lbas:
-            tb = (lbas * 512) / (1024**4)
-            written = f"{tb:.2f} TB"
-
-    # Fallback 2: Host Writes / Cumulative Host Sectors Written variants
-    if written == "?":
-        m = re.search(r"(Host[_ -]?Writes|Cumulative Host Sectors Written)\s*[:=]\s*([\d,]+)", data, re.IGNORECASE)
-        if m:
-            sectors = int(m.group(2).replace(",", ""))
-            tb = (sectors * 512) / (1024**4)
-            written = f"{tb:.2f} TB"
-
-    # Fallback 3: Lifetime / NAND / Physical Writes in GB (some drives report GB directly)
-    if written == "?":
-        m = re.search(r"(Lifetime|Total|NAND|Physical)[_ -]?Writes(_GB)?\s*[:=]\s*([\d,.]+)", data, re.IGNORECASE)
-        if m:
-            gb_str = m.group(3).replace(",", "")
-            try:
-                gb = float(gb_str)
-                tb = gb / 1024
-                written = f"{tb:.2f} TB"
-            except:
-                pass
-
-    # Fallback 4: Scan attribute table for large raw values on common write IDs (241, 246, etc.)
-    if written == "?":
-        for line in data.splitlines():
-            if re.search(r"^\s*(241|242|246|249)\s+", line):  # common IDs for writes
-                parts = re.split(r"\s+", line.strip())
-                if len(parts) >= 10:  # typical: ID FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW
-                    raw_str = parts[-1].replace("-", "").replace(",", "")
-                    try:
-                        raw_val = int(raw_str)
-                        if raw_val > 1000000:  # avoid tiny / temp values
-                            tb = (raw_val * 512) / (1024**4)  # assume sectors
-                            written = f"{tb:.2f} TB"
-                            break
-                    except ValueError:
-                        pass
-
-    return temp, health, written
-
-
-# -------------------------
-# Drive labels
-# -------------------------
 
 def get_drive_labels():
-
-    c = wmi.WMI()
-
-    labels = []
-
-    for disk in c.Win32_DiskDrive():
-
-        model = disk.Model or "Drive"
-        letters = []
-
-        for part in disk.associators("Win32_DiskDriveToDiskPartition"):
-            for logical in part.associators("Win32_LogicalDiskToPartition"):
-                letters.append(logical.DeviceID)
-
-        label = ", ".join(letters) if letters else "No Letter"
-
-        labels.append(f"{label}  {model}")
-
-    return labels
+    try:
+        c = wmi.WMI()
+        labels = []
+        for disk in c.Win32_DiskDrive():
+            model = disk.Model or "Drive"
+            letters = []
+            for part in disk.associators("Win32_DiskDriveToDiskPartition"):
+                for logical in part.associators("Win32_LogicalDiskToPartition"):
+                    letters.append(logical.DeviceID)
+            label = ", ".join(letters) if letters else "No Letter"
+            labels.append(f"{label}  {model}")
+        return labels
+    except:
+        return ["Drive 1", "Drive 2", "Drive 3", "Drive 4"]
 
 
-# -------------------------
-# Gauge widget
-# -------------------------
+def get_drive_info():
+    try:
+        c = wmi.WMI()
+        drives = []
+        for disk in c.Win32_DiskDrive():
+            model = disk.Model or "Drive"
+            letters = []
+            for part in disk.associators("Win32_DiskDriveToDiskPartition"):
+                for logical in part.associators("Win32_LogicalDiskToPartition"):
+                    letters.append(logical.DeviceID)
+            label = ", ".join(letters) if letters else "No Letter"
+            index = int(disk.Index)
+            drives.append({
+                "psutil": f"PhysicalDrive{index}",
+                "smart": f"\\\\.\\PHYSICALDRIVE{index}",
+                "label": f"{label}  {model}",
+                "index": index,
+            })
+        return sorted(drives, key=lambda drive: drive["index"])
+    except Exception as e:
+        print(f"WMI drive lookup failed: {e}")
+        return []
+
+
+class SmartWorker(QThread):
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, disk_devices, previous_cache):
+        super().__init__()
+        self.disk_devices = disk_devices
+        self.previous_cache = previous_cache.copy()
+
+    def run(self):
+        results = {}
+        for disk_name, device, dtype in self.disk_devices:
+            reading = parse_smart(device, dtype)
+            if reading == UNKNOWN_SMART and disk_name in self.previous_cache:
+                reading = self.previous_cache[disk_name]
+            results[disk_name] = reading
+        self.result_ready.emit(results)
+
+
+# RGB, Gauge, Monitor classes (full)
+class RGBController:
+    def __init__(self):
+        self.client = None
+        self.RGBColor = None
+        try:
+            from openrgb import OpenRGBClient
+            from openrgb.utils import RGBColor
+            self.RGBColor = RGBColor
+            self.client = OpenRGBClient()
+        except:
+            self.client = None
+
+    def update(self, cpu, gpu, ram):
+        if self.client is None or self.RGBColor is None:
+            return
+        try:
+            load = max(cpu, gpu, ram)
+            if load <= 50:
+                r = int(255 * (load / 50))
+                g = 255
+                b = 0
+            else:
+                r = 255
+                g = int(255 * (100 - load) / 50)
+                b = 0
+            color = self.RGBColor(r, g, b)
+            self.client.set_color(color)
+        except:
+            pass
+
 
 class Gauge(QWidget):
-
-    def __init__(self, title):
-
+    def __init__(self, title, preferred_size=230, minimum_size=70):
         super().__init__()
-
         self.title = title
+        self.preferred_size = preferred_size
+        self.minimum_size = minimum_size
         self.target = 0
         self.value = 0
-
         self.main = ""
         self.sub1 = ""
         self.sub2 = ""
         self.sub3 = ""
+        self.setMinimumSize(minimum_size, minimum_size)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.history = []
+        self.MAX_HISTORY = 100
+        self.last_smoothed = 0.0
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        self.setMinimumSize(220,220)
+    def sizeHint(self):
+        return QSize(self.preferred_size, self.preferred_size)
+
+    def minimumSizeHint(self):
+        return QSize(self.minimum_size, self.minimum_size)
 
     def set_data(self, percent, main="", s1="", s2="", s3=""):
-
         self.target = percent
         self.main = main
-        self.sub1 = s1
-        self.sub2 = s2
-        self.sub3 = s3
+        self.sub1 = s1 if s1 not in ["?", ""] else "N/A"
+        self.sub2 = s2 if s2 not in ["?", ""] else "N/A"
+        self.sub3 = s3 if s3 not in ["?", ""] else "N/A"
+
+        smoothed = (self.last_smoothed * 0.8) + (percent * 0.2)
+        self.last_smoothed = smoothed
+        self.history.append(smoothed)
+        if len(self.history) > self.MAX_HISTORY:
+            self.history.pop(0)
 
     def tick(self):
-
         self.value += (self.target - self.value) * 0.2
         self.update()
 
     def color(self):
-
         v = self.value
-
         if v < 60:
-            return QColor(0,200,120)
+            return QColor(0, 200, 120)
         elif v < 85:
-            return QColor(255,180,0)
-        return QColor(255,70,70)
+            return QColor(255, 180, 0)
+        return QColor(255, 70, 70)
+
+    def draw_waveform(self, painter: QPainter, rect: QRectF, alpha=140, glow=True):
+        if len(self.history) == 0:
+            return
+        w = rect.width()
+        h = rect.height()
+        if w < 5 or h < 5:
+            return
+        x = int(rect.left())
+        y = int(rect.top())
+        w = int(w)
+        h = int(h)
+        n = len(self.history)
+        bar_width = max(1.5, w / n)
+
+        for i, val in enumerate(self.history):
+            bar_h = (val / 100.0) * h
+            if bar_h < 0.5:
+                continue
+            x_pos = int(x + i * bar_width)
+            y_pos = int(y + h - bar_h)
+            bar_w_int = int(bar_width)
+            bar_h_int = int(bar_h)
+
+            color = QColor(0, 255, 120) if val < 50 else QColor(255, 200, 0) if val < 80 else QColor(255, 60, 0)
+
+            if glow:
+                glow_col = QColor(color.red(), color.green(), color.blue(), 100)
+                painter.setBrush(glow_col)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRect(x_pos, y_pos, bar_w_int, bar_h_int)
+
+            painter.setBrush(color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            core_w = int(bar_width * 0.65)
+            core_x = int(x_pos + (bar_width - core_w) / 2)
+            painter.drawRect(core_x, y_pos, core_w, bar_h_int)
 
     def paintEvent(self, e):
-
         rect = self.rect()
+        if rect.width() < 10 or rect.height() < 10:
+            return
+
         size = min(rect.width(), rect.height())
-
-        square = rect.adjusted(
-            (rect.width()-size)//2,
-            (rect.height()-size)//2,
-            -(rect.width()-size)//2,
-            -(rect.height()-size)//2
-        )
-
-        arc = square.adjusted(24,24,-24,-24)
+        square = rect.adjusted((rect.width() - size) // 2, (rect.height() - size) // 2,
+                               -(rect.width() - size) // 2, -(rect.height() - size) // 2)
+        compact = size < 205
+        inset = max(14, int(size * (0.088 if compact else 0.078)))
+        arc = square.adjusted(inset, inset, -inset, -inset)
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        mode = getattr(self, 'display_mode', 0)
+
+        if mode == 1:
+            waveform_rect = rect.adjusted(8, 8, -8, -8)
+            p.fillRect(waveform_rect, QColor(10, 14, 22))
+            self.draw_waveform(p, waveform_rect, alpha=200, glow=True)
+            p.setPen(QColor(160, 220, 255, 220))
+            p.setFont(QFont("Segoe UI", 10))
+            p.drawText(waveform_rect.adjusted(14, 10, -14, -14),
+                       Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, self.title.upper())
+            return
 
         base = self.color()
-
-        # soft center glow
         center = QPointF(square.center())
         radius = size * 0.42
         radial = QRadialGradient(center, radius)
-        radial.setColorAt(0.00, QColor(base.red(), base.green(), base.blue(), 85))
-        radial.setColorAt(0.28, QColor(base.red(), base.green(), base.blue(), 42))
-        radial.setColorAt(0.58, QColor(base.red(), base.green(), base.blue(), 14))
+        radial.setColorAt(0.00, QColor(base.red(), base.green(), base.blue(), 62 if compact else 76))
+        radial.setColorAt(0.30, QColor(base.red(), base.green(), base.blue(), 30 if compact else 38))
+        radial.setColorAt(0.62, QColor(base.red(), base.green(), base.blue(), 8 if compact else 12))
         radial.setColorAt(1.00, QColor(0, 0, 0, 0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(radial)
-        p.drawEllipse(QRectF(square.adjusted(34, 34, -34, -34)))
+        glow_inset = max(24, int(size * 0.13))
+        p.drawEllipse(QRectF(square.adjusted(glow_inset, glow_inset, -glow_inset, -glow_inset)))
 
-        # subtle outer halo behind ring
+        track_width = max(7, int(size * (0.045 if compact else 0.050)))
+        glow_width = max(10, int(size * (0.066 if compact else 0.074)))
+        tracer_width = max(5, int(size * (0.037 if compact else 0.041)))
+
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 26), 34, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 18), glow_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawArc(arc, 0, 360 * 16)
 
-        # base ring
-        p.setPen(QPen(QColor(60,60,60),16, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(QColor(48, 54, 52), track_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawArc(arc, 0, 360 * 16)
 
-        # animated glow arc
-        span = int(360 * self.value / 100)
+        span = max(0.0, min(360.0, 360.0 * self.value / 100.0))
+        if span > 0.2:
+            span16 = int(span * 16)
+            p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 46), glow_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(arc, 90 * 16, -span16)
 
-        p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 70), 30, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(arc, 90 * 16, -span * 16)
+            tail = min(span, 48.0 if compact else 58.0)
+            segments = 8
+            for i in range(segments):
+                seg_start = max(0.0, span - tail + (tail * i / segments))
+                seg_end = max(0.0, span - tail + (tail * (i + 1) / segments))
+                alpha = int((22 if compact else 30) + (i / max(1, segments - 1)) * (88 if compact else 112))
+                pen = QPen(QColor(base.red(), base.green(), base.blue(), alpha), tracer_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+                p.setPen(pen)
+                p.drawArc(arc, int((90 - seg_start) * 16), -int((seg_end - seg_start) * 16))
 
-        p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 135), 22, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(arc, 90 * 16, -span * 16)
+            p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 230), max(4, int(size * (0.026 if compact else 0.030))), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(arc, 90 * 16, -span16)
 
-        p.setPen(QPen(base, 16, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(arc, 90 * 16, -span * 16)
+            ring_radius = arc.width() / 2.0
+            end_angle = math.radians(90.0 - span)
+            head = QPointF(
+                arc.center().x() + ring_radius * math.cos(end_angle),
+                arc.center().y() - ring_radius * math.sin(end_angle)
+            )
+            head_radius = max(3.8, tracer_width * (0.54 if compact else 0.58))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(base.red(), base.green(), base.blue(), 46 if compact else 58))
+            p.drawEllipse(head, head_radius * 1.85, head_radius * 1.85)
+            p.setBrush(QColor(base.red(), base.green(), base.blue(), 215))
+            p.drawEllipse(head, head_radius, head_radius)
 
         p.setPen(Qt.GlobalColor.white)
 
-        p.setFont(QFont("Segoe UI",10))
-        p.drawText(square.adjusted(0,-75,0,0),
-                   Qt.AlignmentFlag.AlignHCenter,
-                   self.title)
+        micro = size < 130
+        title_offset_y = int(size * (0.73 if compact else 0.72))
+        sub_offset_1 = int(size * (0.19 if compact else 0.20))
+        sub_offset_2 = int(size * (0.275 if compact else 0.28))
+        sub_offset_3 = int(size * (0.355 if compact else 0.36))
 
-        p.setFont(QFont("Segoe UI",20,QFont.Weight.Bold))
+        if size >= 105:
+            p.setFont(QFont("Segoe UI", max(6, int(size * (0.036 if compact else 0.038)))))
+            title_rect = square.adjusted(2, title_offset_y - 20, -2, -sub_offset_1 - 10)
+            p.drawText(title_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextSingleLine, self.title)
+
+        p.setFont(QFont("Segoe UI", max(9, int(size * (0.064 if compact else 0.068))), QFont.Weight.DemiBold))
         p.drawText(square, Qt.AlignmentFlag.AlignCenter, self.main)
 
-        p.setFont(QFont("Segoe UI",9))
+        p.setFont(QFont("Segoe UI", max(6, int(size * (0.038 if compact else 0.040)))))
+        if self.sub1 and self.sub1 != "N/A" and size >= 105:
+            p.drawText(square.adjusted(0, sub_offset_1, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.sub1)
+        if self.sub2 and self.sub2 != "N/A" and size >= 118:
+            p.drawText(square.adjusted(0, sub_offset_2, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.sub2)
+        if self.sub3 and self.sub3 != "N/A" and not micro:
+            p.drawText(square.adjusted(0, sub_offset_3, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.sub3)
 
-        if self.sub1:
-            p.drawText(square.adjusted(0,45,0,0),
-                       Qt.AlignmentFlag.AlignHCenter,
-                       self.sub1)
+        if mode == 2 and len(self.history) > 0:
+            wave_rect = square.adjusted(28, int(size * 0.60), -28, -int(size * 0.14))
+            if wave_rect.width() > 5 and wave_rect.height() > 5:
+                p.setOpacity(0.70)
+                self.draw_waveform(p, wave_rect, alpha=120, glow=False)
+                p.setOpacity(1.0)
 
-        if self.sub2:
-            p.drawText(square.adjusted(0,63,0,0),
-                       Qt.AlignmentFlag.AlignHCenter,
-                       self.sub2)
-
-        if self.sub3:
-            p.drawText(square.adjusted(0,81,0,0),
-                       Qt.AlignmentFlag.AlignHCenter,
-                       self.sub3)
-
-
-# -------------------------
-# Main monitor
-# -------------------------
 
 class Monitor(QWidget):
-
     def __init__(self):
-
         super().__init__()
+        self.setWindowTitle("Diffusion Telemetry Gauge System")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setStyleSheet(WINDOW_STYLE)
 
-        self.setWindowTitle("System Gauges")
+        self.gpu_handle = None
+        try:
+            pynvml.nvmlInit()
+            self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            print("NVML GPU initialized")
+        except Exception as e:
+            print(f"NVML init failed: {e}")
 
-        pynvml.nvmlInit()
-        self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-
-        # GPU-only fix:
-        # keep a short rolling window so bursty FLUX kernels don't read falsely low
         self.gpu_samples = []
         self.gpu_window_seconds = 1.6
 
         self.last = psutil.disk_io_counters(perdisk=True)
         self.last_time = time.time()
 
-        # ---- Disk detection + sorting ----
+        disk_counters = psutil.disk_io_counters(perdisk=True)
+        drive_info = [drive for drive in get_drive_info() if drive["psutil"] in disk_counters]
+        if not drive_info:
+            drive_info = [
+                {"psutil": name, "smart": f"\\\\.\\PHYSICALDRIVE{i}", "label": name, "index": i}
+                for i, name in enumerate(disk_counters.keys())
+            ]
 
-        disk_names = list(psutil.disk_io_counters(perdisk=True).keys())
-        labels = get_drive_labels()
-
-        pairs = list(zip(disk_names, labels))
-
-        pairs.sort(key=lambda x: x[1])  # SORT BY DRIVE LETTER
-
-        self.disks = [p[0] for p in pairs]
-        self.labels = [p[1] for p in pairs]
-
-        # ----------------------------------
+        self.disks = [drive["psutil"] for drive in drive_info]
+        self.labels = [drive["label"] for drive in drive_info]
+        self.smart_paths = {drive["psutil"]: drive["smart"] for drive in drive_info}
 
         layout = QVBoxLayout(self)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        self.hint_label = QLabel("Press F1 to cycle display modes", self)
+        self.hint_label.setStyleSheet("""
+            color: #a9d8ff;
+            font-size: 12px;
+            background: #111a2a;
+            padding: 6px 10px;
+            border-radius: 3px;
+        """)
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.hint_label)
+
+        self.main_scroll = QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setStyleSheet("QScrollArea { border: 0; background: transparent; }")
 
         container = QWidget()
-        grid = QGridLayout(container)
+        container_layout = QVBoxLayout(container)
+        top_grid = QGridLayout()
+        drive_grid = QGridLayout()
 
-        self.gpu = Gauge("GPU")
-        self.ram = Gauge("RAM")
+        container_layout.setContentsMargins(8, 8, 8, 8)
+        container_layout.setSpacing(10)
+        top_grid.setHorizontalSpacing(10)
+        top_grid.setVerticalSpacing(10)
+        top_grid.setColumnStretch(0, 1)
+        top_grid.setColumnStretch(1, 1)
+        top_grid.setColumnStretch(2, 1)
+        drive_grid.setHorizontalSpacing(8)
+        drive_grid.setVerticalSpacing(8)
 
-        grid.addWidget(self.gpu,0,0)
-        grid.addWidget(self.ram,0,1)
+        self.gpu = Gauge("GPU", preferred_size=250, minimum_size=80)
+        self.ram = Gauge("RAM", preferred_size=250, minimum_size=80)
+        self.cpu = Gauge("CPU", preferred_size=250, minimum_size=80)
+
+        top_grid.addWidget(self.gpu, 0, 0)
+        top_grid.addWidget(self.cpu, 0, 1)
+        top_grid.addWidget(self.ram, 0, 2)
+
+        container_layout.addLayout(top_grid, 3)
 
         self.disk_gauges = {}
 
-        for i,d in enumerate(self.disks):
-
-            g = Gauge(self.labels[i])
+        for i, d in enumerate(self.disks):
+            g = Gauge(self.labels[i], preferred_size=178, minimum_size=64)
+            g.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.disk_gauges[d] = g
+            row = i // 4
+            col = i % 4
+            drive_grid.addWidget(g, row, col)
 
-            row = 1 + (i//2)
-            col = i%2
+        for col in range(4):
+            drive_grid.setColumnStretch(col, 1)
 
-            grid.addWidget(g,row,col)
+        container_layout.addLayout(drive_grid, 2)
 
-        scroll.setWidget(container)
-        layout.addWidget(scroll)
+        self.main_scroll.setWidget(container)
+        layout.addWidget(self.main_scroll)
 
-        # SMART
-
-        self.smart_devices = self.detect_smart()
+        detected_smart = detect_smart()
+        self.smart_devices = {
+            physicaldrive_index(device): (device, dtype)
+            for device, dtype in detected_smart
+        }
         self.smart_cache = {}
         self.last_smart = 0
+        self.smart_worker = None
 
-        # Tray
+        self.rgb = RGBController()
 
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-
-        self.tray = QSystemTrayIcon(icon,self)
+        self.tray = QSystemTrayIcon(icon, self)
 
         menu = QMenu()
-
-        show = QAction("Show",self)
-        hide = QAction("Hide",self)
-        exit = QAction("Exit",self)
+        show = QAction("Show", self)
+        hide = QAction("Hide", self)
+        exit = QAction("Exit", self)
 
         show.triggered.connect(self.show)
         hide.triggered.connect(self.hide)
@@ -441,156 +628,182 @@ class Monitor(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.show()
 
-        # timers
-
-        self.timer = QTimer()
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_stats)
         self.timer.start(REFRESH_MS)
 
-        self.anim = QTimer()
+        self.anim = QTimer(self)
         self.anim.timeout.connect(self.animate)
-        self.anim.start(33)
+        self.anim.start(10)
 
-    def detect_smart(self):
+        self.display_mode = 0
+        self._sync_modes()
 
-        out = run_command(["smartctl","--scan-open"])
+        QTimer.singleShot(800, self._force_focus)
 
-        devices = []
+    def _force_focus(self):
+        self.activateWindow()
+        self.raise_()
+        self.setFocus()
 
-        for line in out.splitlines():
+    def _sync_modes(self):
+        self.gpu.display_mode = self.display_mode
+        self.ram.display_mode = self.display_mode
+        self.cpu.display_mode = self.display_mode
+        for g in self.disk_gauges.values():
+            g.display_mode = self.display_mode
+        self._update_hint_label()
 
-            parts = line.split()
+    def _sync_page(self):
+        self.main_scroll.show()
+        self._update_hint_label()
 
-            if not parts:
-                continue
+    def _update_hint_label(self):
+        modes = ["Classic", "Telemetry (pulse bars)", "Hybrid"]
+        self.hint_label.setText(
+            f"Current mode: {modes[self.display_mode]}   —   F1 cycles display modes"
+        )
 
-            device = parts[0]
-            dtype = None
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_F1:
+            self.display_mode = (self.display_mode + 1) % 3
+            self._sync_modes()
+            self.update()
+            event.accept()
+            return
 
-            if "-d" in parts:
-                dtype = parts[parts.index("-d")+1]
-
-            devices.append((device,dtype))
-
-        return devices
+        super().keyPressEvent(event)
 
     def refresh_smart(self):
+        if self.smart_worker and self.smart_worker.isRunning():
+            return
 
-        for i,d in enumerate(self.disks):
+        disk_devices = []
+        for d in self.disks:
+            smart_path = self.smart_paths.get(d, "")
+            index = physicaldrive_index(smart_path)
+            device, dtype = self.smart_devices.get(index, (smart_path, None))
+            if device:
+                disk_devices.append((d, device, dtype))
 
-            if not self.smart_devices:
-                self.smart_cache[d] = ("?","?","?")
-                continue
+        if not disk_devices:
+            return
 
-            device,dtype = self.smart_devices[min(i,len(self.smart_devices)-1)]
+        self.smart_worker = SmartWorker(disk_devices, self.smart_cache)
+        self.smart_worker.result_ready.connect(self._smart_finished)
+        self.smart_worker.start()
 
-            self.smart_cache[d] = parse_smart(device,dtype)
-
-        self.last_smart = time.time()
+    def _smart_finished(self, results):
+        self.smart_cache.update(results)
+        self.smart_worker = None
 
     def animate(self):
-
         self.gpu.tick()
         self.ram.tick()
-
+        self.cpu.tick()
         for g in self.disk_gauges.values():
             g.tick()
 
     def update_stats(self):
-
         # GPU
-        util = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
-        temp = pynvml.nvmlDeviceGetTemperature(
-            self.gpu_handle,
-            pynvml.NVML_TEMPERATURE_GPU
-        )
-
-        gpu_now = time.time()
-        gpu_pct = max(int(util.gpu), int(util.memory))
-
-        self.gpu_samples.append((gpu_now, gpu_pct))
-        cutoff = gpu_now - self.gpu_window_seconds
-        self.gpu_samples = [(t, v) for t, v in self.gpu_samples if t >= cutoff]
-
-        if self.gpu_samples:
-            gpu_display = max(v for t, v in self.gpu_samples)
-        else:
-            gpu_display = gpu_pct
-
         try:
-            mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
-            vram_used_gb = mem_info.used / (1024 ** 3)
-            vram_total_gb = mem_info.total / (1024 ** 3)
-            vram_text = f"VRAM {vram_used_gb:.1f}/{vram_total_gb:.1f} GB"
-        except:
-            vram_text = ""
+            if self.gpu_handle:
+                util = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
+                temp = pynvml.nvmlDeviceGetTemperature(self.gpu_handle, pynvml.NVML_TEMPERATURE_GPU)
+                gpu_now = time.time()
+                gpu_pct = max(int(util.gpu), int(util.memory))
+                self.gpu_samples.append((gpu_now, gpu_pct))
+                cutoff = gpu_now - self.gpu_window_seconds
+                self.gpu_samples = [(t, v) for t, v in self.gpu_samples if t >= cutoff]
+                gpu_display = max(v for t, v in self.gpu_samples) if self.gpu_samples else gpu_pct
 
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
+                vram_used_gb = mem_info.used / (1024 ** 3)
+                vram_total_gb = mem_info.total / (1024 ** 3)
+                power_w = pynvml.nvmlDeviceGetPowerUsage(self.gpu_handle) / 1000.0
+
+                self.gpu.set_data(gpu_display, f"{gpu_display:.0f}%", f"{c_to_f(temp)}°F",
+                                  f"VRAM {vram_used_gb:.1f}/{vram_total_gb:.1f} GB", f"{power_w:.0f} W")
+            else:
+                self.gpu.set_data(0, "0%", "N/A", "", "")
+        except Exception as e:
+            print(f"GPU update failed: {e}")
+            self.gpu.set_data(0, "GPU Error", "", "", "")
+
+        # CPU
         try:
-            power_w = pynvml.nvmlDeviceGetPowerUsage(self.gpu_handle) / 1000.0
-            power_text = f"{power_w:.0f} W"
-        except:
-            power_text = ""
-
-        self.gpu.set_data(
-            gpu_display,
-            f"{gpu_display:.0f}%",
-            f"{c_to_f(temp)}°F",
-            vram_text,
-            power_text
-        )
+            cpu_pct = psutil.cpu_percent(interval=None)
+            freq = psutil.cpu_freq()
+            freq_text = f"{freq.current / 1000:.2f} GHz" if freq else "Freq N/A"
+            cores = psutil.cpu_count(logical=False) or 0
+            threads = psutil.cpu_count(logical=True) or 0
+            self.cpu.set_data(cpu_pct, f"{cpu_pct:.0f}%", freq_text, f"{cores}C / {threads}T", "CPU Load")
+        except Exception as e:
+            print(f"CPU update failed: {e}")
+            cpu_pct = 0
+            self.cpu.set_data(0, "CPU Error", "", "", "")
 
         # RAM
-        mem = psutil.virtual_memory()
-        used_gb = mem.used / (1024 ** 3)
-        avail_gb = mem.available / (1024 ** 3)
+        try:
+            mem = psutil.virtual_memory()
+            used_gb = mem.used / (1024 ** 3)
+            avail_gb = mem.available / (1024 ** 3)
+            self.ram.set_data(mem.percent, f"{used_gb:.1f} GB", f"{mem.percent:.1f}%", f"Avail {avail_gb:.1f} GB")
+        except:
+            pass
 
-        self.ram.set_data(
-            mem.percent,
-            f"{used_gb:.1f} GB",           # main number = In Use (like Task Manager)
-            f"{mem.percent:.1f}%",
-            f"Avail {avail_gb:.1f} GB"
-        )
+        # Disks
+        try:
+            now = time.time()
+            dt = now - self.last_time
+            self.last_time = now
+            cur = psutil.disk_io_counters(perdisk=True)
 
-        # DISKS
+            if now - self.last_smart > SMART_REFRESH_SECONDS:
+                self.refresh_smart()
+                self.last_smart = now
 
-        now = time.time()
-        dt = now - self.last_time
-        self.last_time = now
+            for d in self.disks:
+                r = w = 0
+                try:
+                    r = ((cur[d].read_bytes - self.last[d].read_bytes) / 1024 / 1024) / dt
+                    w = ((cur[d].write_bytes - self.last[d].write_bytes) / 1024 / 1024) / dt
+                except:
+                    pass
 
-        cur = psutil.disk_io_counters(perdisk=True)
+                total = max(0, r + w)
+                pct = min(total / 500 * 100, 100)
 
-        if now - self.last_smart > SMART_REFRESH_SECONDS:
-            self.refresh_smart()
+                temp, health = self.smart_cache.get(d, UNKNOWN_SMART)
 
-        for d in self.disks:
+                self.disk_gauges[d].set_data(
+                    pct,
+                    format_speed(total),
+                    format_temp(temp),
+                    f"Health {health}",
+                    ""
+                )
 
-            try:
-                r = ((cur[d].read_bytes-self.last[d].read_bytes)/1024/1024)/dt
-                w = ((cur[d].write_bytes-self.last[d].write_bytes)/1024/1024)/dt
-            except:
-                r=w=0
+            self.last = cur
+        except Exception as e:
+            print(f"Disk update failed: {e}")
 
-            total = max(0,r+w)
-
-            pct = min(total/500*100,100)
-
-            temp,health,writes = self.smart_cache.get(d,("?", "?", "?"))
-
-            self.disk_gauges[d].set_data(
-                pct,
-                format_speed(total),
-                f"Temp {c_to_f(temp)}°F",
-                f"Health {health}",
-                f"Writes {writes}"
-            )
-
-        self.last = cur
+        # RGB
+        try:
+            cpu = cpu_pct if 'cpu_pct' in locals() else psutil.cpu_percent(interval=None)
+            gpu = gpu_display if 'gpu_display' in locals() else 0
+            ram_pct = mem.percent if 'mem' in locals() else 0
+            self.rgb.update(cpu, gpu, ram_pct)
+        except:
+            pass
 
 
-app = QApplication(sys.argv)
-
-window = Monitor()
-window.resize(600,800)
-window.show()
-
-sys.exit(app.exec())
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = Monitor()
+    window.resize(840, 540)
+    window.show()
+    window.activateWindow()
+    window.raise_()
+    window.setFocus()
+    sys.exit(app.exec())
