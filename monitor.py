@@ -18,7 +18,7 @@ warnings.filterwarnings(
 import pynvml
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -29,7 +29,8 @@ from PyQt6.QtWidgets import (
     QMenu,
     QStyle,
     QLabel,
-    QSizePolicy
+    QSizePolicy,
+    QFileDialog
 )
 
 REFRESH_MS = 150
@@ -38,6 +39,9 @@ SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
 UNKNOWN_SMART = ("?", "N/A")
 SMART_DEBUG = False
 DEFAULT_SKIN = "graphite"
+CUSTOM_SKIN_KEY = "custom_image"
+CUSTOM_IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
+CUSTOM_IMAGE_OVERLAY_ALPHA = 178
 
 SKINS = {
     "graphite": {"name": "Graphite", "background": "#17191c", "panel": "#111a2a", "text": "#f3fbff", "hint": "#a9d8ff"},
@@ -88,10 +92,19 @@ def skin_by_key(key):
     return SKINS.get(key, SKINS[DEFAULT_SKIN])
 
 
+def custom_image_path(config):
+    path = config.get("custom_image_path", "")
+    return Path(path) if path else None
+
+
 def window_style(skin):
     return f"""
-QWidget {{
+QWidget#MonitorRoot {{
     background: {skin["background"]};
+    color: {skin["text"]};
+    font-family: "Segoe UI";
+}}
+QWidget {{
     color: {skin["text"]};
     font-family: "Segoe UI";
 }}
@@ -565,13 +578,18 @@ class Gauge(QWidget):
 class Monitor(QWidget):
     def __init__(self):
         super().__init__()
+        self.setObjectName("MonitorRoot")
         self.setWindowTitle("System Gauges")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.config = load_config()
         self.current_skin_key = self.config.get("skin", DEFAULT_SKIN)
-        if self.current_skin_key not in SKINS:
+        if self.current_skin_key not in SKINS and self.current_skin_key != CUSTOM_SKIN_KEY:
             self.current_skin_key = DEFAULT_SKIN
         self.skin_actions = {}
+        self.custom_image_action = None
+        self.clear_custom_image_action = None
+        self.background_pixmap = QPixmap()
+        self.load_background_image()
         self.apply_skin(save=False)
         self.app_icon = QIcon(str(resource_path("app.ico")))
         if not self.app_icon.isNull():
@@ -696,6 +714,18 @@ class Monitor(QWidget):
             skin_menu.addAction(action)
             self.skin_actions[key] = action
 
+        skin_menu.addSeparator()
+        self.custom_image_action = QAction("Custom Image...", self)
+        self.custom_image_action.setCheckable(True)
+        self.custom_image_action.setChecked(self.current_skin_key == CUSTOM_SKIN_KEY)
+        self.custom_image_action.triggered.connect(self.choose_custom_image)
+        self.skin_group.addAction(self.custom_image_action)
+        skin_menu.addAction(self.custom_image_action)
+
+        self.clear_custom_image_action = QAction("Clear Custom Image", self)
+        self.clear_custom_image_action.triggered.connect(self.clear_custom_image)
+        skin_menu.addAction(self.clear_custom_image_action)
+
         menu.addSeparator()
         menu.addAction(exit)
 
@@ -723,16 +753,61 @@ class Monitor(QWidget):
         if hasattr(self, "skin_actions"):
             for key, action in self.skin_actions.items():
                 action.setChecked(key == self.current_skin_key)
+        if hasattr(self, "custom_image_action") and self.custom_image_action:
+            self.custom_image_action.setChecked(self.current_skin_key == CUSTOM_SKIN_KEY)
+        if hasattr(self, "clear_custom_image_action") and self.clear_custom_image_action:
+            has_custom = bool(custom_image_path(self.config))
+            self.clear_custom_image_action.setEnabled(has_custom)
         if save:
             self.config["skin"] = self.current_skin_key
             save_config(self.config)
+        self.update()
 
     def set_skin(self, skin_key):
         if skin_key not in SKINS:
             return
         self.current_skin_key = skin_key
         self.apply_skin(save=True)
-        self.update()
+
+    def load_background_image(self):
+        path = custom_image_path(self.config)
+        if path and path.exists():
+            self.background_pixmap = QPixmap(str(path))
+        else:
+            self.background_pixmap = QPixmap()
+
+    def choose_custom_image(self):
+        start_dir = str(custom_image_path(self.config).parent) if custom_image_path(self.config) else str(Path.home())
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose Background Image", start_dir, CUSTOM_IMAGE_FILTER)
+        if not filename:
+            self.apply_skin(save=False)
+            return
+        self.config["custom_image_path"] = filename
+        self.current_skin_key = CUSTOM_SKIN_KEY
+        self.load_background_image()
+        self.apply_skin(save=True)
+
+    def clear_custom_image(self):
+        self.config.pop("custom_image_path", None)
+        self.background_pixmap = QPixmap()
+        if self.current_skin_key == CUSTOM_SKIN_KEY:
+            self.current_skin_key = DEFAULT_SKIN
+        self.apply_skin(save=True)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.current_skin_key == CUSTOM_SKIN_KEY and not self.background_pixmap.isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            scaled = self.background_pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+            painter.fillRect(self.rect(), QColor(10, 12, 14, CUSTOM_IMAGE_OVERLAY_ALPHA))
 
     def _force_focus(self):
         self.activateWindow()
