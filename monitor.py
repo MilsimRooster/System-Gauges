@@ -471,6 +471,40 @@ class Gauge(QWidget):
             core_x = int(x_pos + (bar_width - core_w) / 2)
             painter.drawRect(core_x, y_pos, core_w, bar_h_int)
 
+    def draw_arc_waveform(self, painter: QPainter, arc: QRectF, size):
+        if len(self.history) == 0 or arc.width() < 20 or arc.height() < 20:
+            return
+
+        values = self.history[-52:]
+        if not values:
+            return
+
+        center = arc.center()
+        ring_radius = arc.width() / 2.0
+        base_radius = ring_radius - max(12.0, size * 0.080)
+        max_bar = max(7.0, size * 0.105)
+        start_angle = 205.0
+        end_angle = 335.0
+        step = (end_angle - start_angle) / max(1, len(values) - 1)
+        pen_width = max(2.0, size * 0.010)
+
+        for i, val in enumerate(values):
+            bar_len = max(1.5, (val / 100.0) * max_bar)
+            angle_deg = start_angle + (i * step)
+            angle = math.radians(angle_deg)
+            inner = QPointF(
+                center.x() + base_radius * math.cos(angle),
+                center.y() - base_radius * math.sin(angle)
+            )
+            outer = QPointF(
+                center.x() + (base_radius + bar_len) * math.cos(angle),
+                center.y() - (base_radius + bar_len) * math.sin(angle)
+            )
+            color = QColor(0, 255, 120) if val < 50 else QColor(255, 200, 0) if val < 80 else QColor(255, 60, 0)
+            color.setAlpha(145 if self.uses_image_background() else 175)
+            painter.setPen(QPen(color, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(inner, outer)
+
     def paintEvent(self, e):
         rect = self.rect()
         if rect.width() < 10 or rect.height() < 10:
@@ -582,11 +616,7 @@ class Gauge(QWidget):
             p.drawText(square.adjusted(0, sub_offset_3, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.sub3)
 
         if mode == 2 and len(self.history) > 0:
-            wave_rect = square.adjusted(28, int(size * 0.60), -28, -int(size * 0.14))
-            if wave_rect.width() > 5 and wave_rect.height() > 5:
-                p.setOpacity(0.70)
-                self.draw_waveform(p, wave_rect, alpha=120, glow=False)
-                p.setOpacity(1.0)
+            self.draw_arc_waveform(p, arc, size)
 
 
 class Monitor(QWidget):
