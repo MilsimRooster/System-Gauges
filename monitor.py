@@ -41,7 +41,7 @@ SMART_DEBUG = False
 DEFAULT_SKIN = "graphite"
 CUSTOM_SKIN_KEY = "custom_image"
 CUSTOM_IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
-CUSTOM_IMAGE_OVERLAY_ALPHA = 178
+CUSTOM_IMAGE_OVERLAY_ALPHA = 132
 
 SKINS = {
     "graphite": {"name": "Graphite", "background": "#17191c", "panel": "#111a2a", "text": "#f3fbff", "hint": "#a9d8ff"},
@@ -107,9 +107,13 @@ QWidget#MonitorRoot {{
 QWidget {{
     color: {skin["text"]};
     font-family: "Segoe UI";
+    background: transparent;
 }}
 QScrollArea {{
     border: 0;
+    background: transparent;
+}}
+QScrollArea > QWidget > QWidget {{
     background: transparent;
 }}
 QScrollBar:vertical, QScrollBar:horizontal {{
@@ -630,9 +634,18 @@ class Monitor(QWidget):
 
         self.main_scroll = QScrollArea()
         self.main_scroll.setWidgetResizable(True)
-        self.main_scroll.setStyleSheet("QScrollArea { border: 0; background: transparent; }")
+        self.main_scroll.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.main_scroll.setAutoFillBackground(False)
+        self.main_scroll.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.main_scroll.viewport().setAutoFillBackground(False)
+        self.main_scroll.setStyleSheet("""
+            QScrollArea { border: 0; background: transparent; }
+            QScrollArea > QWidget > QWidget { background: transparent; }
+        """)
 
         container = QWidget()
+        container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        container.setAutoFillBackground(False)
         container_layout = QVBoxLayout(container)
         top_grid = QGridLayout()
         drive_grid = QGridLayout()
