@@ -395,6 +395,12 @@ class Gauge(QWidget):
         self.background_is_image = False
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
+    def uses_image_background(self):
+        parent = self.window()
+        if hasattr(parent, "using_custom_image_background"):
+            return parent.using_custom_image_background()
+        return self.background_is_image
+
     def sizeHint(self):
         return QSize(self.preferred_size, self.preferred_size)
 
@@ -450,11 +456,11 @@ class Gauge(QWidget):
             bar_h_int = int(bar_h)
 
             color = QColor(0, 255, 120) if val < 50 else QColor(255, 200, 0) if val < 80 else QColor(255, 60, 0)
-            if self.background_is_image:
+            if self.uses_image_background():
                 color.setAlpha(220)
 
             if glow:
-                glow_col = QColor(color.red(), color.green(), color.blue(), 76 if self.background_is_image else 100)
+                glow_col = QColor(color.red(), color.green(), color.blue(), 76 if self.uses_image_background() else 100)
                 painter.setBrush(glow_col)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawRect(x_pos, y_pos, bar_w_int, bar_h_int)
@@ -486,7 +492,7 @@ class Gauge(QWidget):
 
         if mode == 1:
             waveform_rect = rect.adjusted(8, 8, -8, -8)
-            bg_alpha = 118 if self.background_is_image else 255
+            bg_alpha = 118 if self.uses_image_background() else 255
             p.fillRect(waveform_rect, QColor(10, 14, 22, bg_alpha))
             self.draw_waveform(p, waveform_rect, alpha=200, glow=True)
             p.setPen(QColor(160, 220, 255, 220))
@@ -759,13 +765,14 @@ class Monitor(QWidget):
 
         self.display_mode = 0
         self._sync_modes()
+        self.apply_skin(save=False)
 
         QTimer.singleShot(800, self._force_focus)
 
     def apply_skin(self, save=True):
         skin = skin_by_key(self.current_skin_key)
         self.setStyleSheet(window_style(skin))
-        is_image = self.current_skin_key == CUSTOM_SKIN_KEY and not self.background_pixmap.isNull()
+        is_image = self.using_custom_image_background()
         if hasattr(self, "gpu"):
             self.gpu.background_is_image = is_image
             self.ram.background_is_image = is_image
@@ -786,6 +793,9 @@ class Monitor(QWidget):
             self.config["skin"] = self.current_skin_key
             save_config(self.config)
         self.update()
+
+    def using_custom_image_background(self):
+        return self.current_skin_key == CUSTOM_SKIN_KEY and not self.background_pixmap.isNull()
 
     def set_skin(self, skin_key):
         if skin_key not in SKINS:
