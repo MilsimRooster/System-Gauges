@@ -56,3 +56,16 @@ python -m PyInstaller --onefile --windowed --name SystemGauges --icon app.ico --
 ```
 
 The finished executable will be created at `dist\SystemGauges.exe`.
+
+## Release
+
+The repository includes a GitHub Actions workflow that builds `SystemGauges.exe` on Windows.
+
+To publish a release:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+GitHub will build the EXE and attach it to the release. The EXE is intentionally not committed directly to the repository.
