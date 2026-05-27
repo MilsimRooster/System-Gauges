@@ -2,6 +2,8 @@
 
 System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, and SMART-enabled storage. It uses animated circular gauges, adaptive sizing, and a compact `3 up top / 4 below` dashboard layout.
 
+![System Gauges classic mode with custom background](full_classic.png)
+
 ## Features
 
 - CPU load, frequency, core/thread count, and usage gauge.
@@ -45,6 +47,24 @@ Tray menu:
 
 - `Background Skin`: choose a preset dashboard background skin. The selected skin is saved to `%APPDATA%\SystemGauges\config.json`.
 - `Background Skin > Custom Image...`: choose a `.png`, `.jpg`, `.jpeg`, `.webp`, or `.bmp` image as the dashboard background. A dark overlay is applied automatically to preserve gauge readability.
+
+## Screenshots
+
+Classic:
+
+![Classic mode](full_classic.png)
+
+Telemetry:
+
+![Telemetry mode](full_telemetry.png)
+
+Hybrid:
+
+![Hybrid mode](full_hybrid.png)
+
+Tray background menu:
+
+![Tray background menu](tray_options.png)
 
 ## Notes
 
