@@ -47,3 +47,12 @@ Keyboard:
 - SMART data is refreshed less often than CPU/GPU/RAM to avoid excessive disk queries.
 - Drive tiles intentionally show activity speed, temperature, and health only.
 - The `nvidia-ml-py` package is imported as `pynvml`; this is expected.
+
+## Build EXE
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --windowed --name SystemGauges --icon app.ico --add-data "app.ico;." monitor.py
+```
+
+The finished executable will be created at `dist\SystemGauges.exe`.

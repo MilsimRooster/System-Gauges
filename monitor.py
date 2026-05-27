@@ -4,6 +4,7 @@ import re
 import subprocess
 import math
 import warnings
+from pathlib import Path
 import psutil
 import wmi
 
@@ -15,7 +16,7 @@ warnings.filterwarnings(
 import pynvml
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QRadialGradient, QBrush
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QRadialGradient, QBrush, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -39,6 +40,11 @@ SMART_DEBUG = False
 def smart_log(message):
     if SMART_DEBUG:
         print(message)
+
+
+def resource_path(filename):
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base_path / filename
 
 
 WINDOW_STYLE = """
@@ -510,6 +516,9 @@ class Monitor(QWidget):
         self.setWindowTitle("Diffusion Telemetry Gauge System")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setStyleSheet(WINDOW_STYLE)
+        self.app_icon = QIcon(str(resource_path("app.ico")))
+        if not self.app_icon.isNull():
+            self.setWindowIcon(self.app_icon)
 
         self.gpu_handle = None
         try:
@@ -608,7 +617,7 @@ class Monitor(QWidget):
 
         self.rgb = RGBController()
 
-        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        icon = self.app_icon if not self.app_icon.isNull() else self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray = QSystemTrayIcon(icon, self)
 
         menu = QMenu()
