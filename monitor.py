@@ -513,7 +513,7 @@ class Gauge(QWidget):
 class Monitor(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Diffusion Telemetry Gauge System")
+        self.setWindowTitle("System Gauges")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setStyleSheet(WINDOW_STYLE)
         self.app_icon = QIcon(str(resource_path("app.ico")))
