@@ -51,8 +51,8 @@ Keyboard:
 ## Build EXE
 
 ```powershell
-pip install pyinstaller
-pyinstaller --onefile --windowed --name SystemGauges --icon app.ico --add-data "app.ico;." monitor.py
+python -m pip install pyinstaller
+python -m PyInstaller --onefile --windowed --name SystemGauges --icon app.ico --add-data "app.ico;." monitor.py
 ```
 
 The finished executable will be created at `dist\SystemGauges.exe`.
