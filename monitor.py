@@ -789,6 +789,7 @@ class Monitor(QWidget):
         self.smart_cache = {}
         self.last_smart = 0
         self.smart_worker = None
+        self.smart_workers = []
 
         self.rgb = RGBController()
 
@@ -1084,6 +1085,9 @@ class Monitor(QWidget):
 
     def exit_app(self):
         log_event("Exit selected from tray menu")
+        self.timer.stop()
+        self.anim.stop()
+        self.stop_smart_workers()
         QApplication.quit()
 
     def handle_tray_activated(self, reason):
@@ -1113,7 +1117,7 @@ class Monitor(QWidget):
         super().keyPressEvent(event)
 
     def refresh_smart(self):
-        if self.smart_worker and self.smart_worker.isRunning():
+        if any(worker.isRunning() for worker in self.smart_workers):
             return
 
         disk_devices = []
@@ -1127,12 +1131,30 @@ class Monitor(QWidget):
         if not disk_devices:
             return
 
-        self.smart_worker = SmartWorker(disk_devices, self.smart_cache)
-        self.smart_worker.result_ready.connect(self._smart_finished)
-        self.smart_worker.start()
+        worker = SmartWorker(disk_devices, self.smart_cache)
+        self.smart_worker = worker
+        self.smart_workers.append(worker)
+        worker.result_ready.connect(self._smart_finished)
+        worker.finished.connect(lambda worker=worker: self._smart_worker_finished(worker))
+        worker.start()
 
     def _smart_finished(self, results):
         self.smart_cache.update(results)
+
+    def _smart_worker_finished(self, worker):
+        if self.smart_worker is worker:
+            self.smart_worker = None
+        if worker in self.smart_workers:
+            self.smart_workers.remove(worker)
+        worker.deleteLater()
+
+    def stop_smart_workers(self):
+        for worker in list(self.smart_workers):
+            if worker.isRunning():
+                worker.wait(3000)
+            if worker in self.smart_workers:
+                self.smart_workers.remove(worker)
+            worker.deleteLater()
         self.smart_worker = None
 
     def safe_animate(self):
