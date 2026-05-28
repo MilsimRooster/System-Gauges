@@ -724,11 +724,6 @@ class Monitor(QWidget):
 
         layout = QVBoxLayout(self)
 
-        self.hint_label = QLabel("Press F1 to cycle display modes", self)
-        self.hint_label.setStyleSheet(hint_style(skin_by_key(self.current_skin_key)))
-        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.hint_label)
-
         self.main_scroll = QScrollArea()
         self.main_scroll.setWidgetResizable(True)
         self.main_scroll.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -881,8 +876,6 @@ class Monitor(QWidget):
             self.cpu.background_is_image = is_image
             for gauge in self.disk_gauges.values():
                 gauge.background_is_image = is_image
-        if hasattr(self, "hint_label"):
-            self.hint_label.setStyleSheet(hint_style(skin))
         if hasattr(self, "skin_actions"):
             for key, action in self.skin_actions.items():
                 action.setChecked(key == self.current_skin_key)
@@ -1001,8 +994,6 @@ class Monitor(QWidget):
         self.apply_skin(save=True)
 
     def sync_background_layers(self):
-        if hasattr(self, "hint_label"):
-            self.hint_label.raise_()
         if hasattr(self, "main_scroll"):
             self.main_scroll.raise_()
 
@@ -1107,17 +1098,9 @@ class Monitor(QWidget):
         self.cpu.display_mode = self.display_mode
         for g in self.disk_gauges.values():
             g.display_mode = self.display_mode
-        self._update_hint_label()
 
     def _sync_page(self):
         self.main_scroll.show()
-        self._update_hint_label()
-
-    def _update_hint_label(self):
-        modes = ["Classic", "Telemetry (pulse bars)", "Hybrid"]
-        self.hint_label.setText(
-            f"Current mode: {modes[self.display_mode]}   —   F1 cycles display modes"
-        )
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_F1:
