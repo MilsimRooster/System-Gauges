@@ -33,13 +33,12 @@ from PyQt6.QtWidgets import (
     QFileDialog
 )
 try:
-    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
-    from PyQt6.QtMultimediaWidgets import QVideoWidget
+    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
     VIDEO_BACKGROUND_AVAILABLE = True
 except Exception as e:
     QAudioOutput = None
     QMediaPlayer = None
-    QVideoWidget = None
+    QVideoSink = None
     VIDEO_BACKGROUND_AVAILABLE = False
     print(f"Video background support unavailable: {e}")
 
@@ -660,10 +659,10 @@ class Monitor(QWidget):
         self.app_icon = QIcon(str(resource_path("app.ico")))
         if not self.app_icon.isNull():
             self.setWindowIcon(self.app_icon)
-        self.video_widget = None
-        self.video_overlay = None
         self.video_player = None
         self.video_audio = None
+        self.video_sink = None
+        self.video_frame_pixmap = QPixmap()
         self.video_error = ""
         self.init_video_background()
 
@@ -881,7 +880,6 @@ class Monitor(QWidget):
         return (
             self.current_skin_key == VIDEO_SKIN_KEY
             and VIDEO_BACKGROUND_AVAILABLE
-            and bool(getattr(self, "video_widget", None))
             and bool(custom_video_path(self.config))
             and not getattr(self, "video_error", "")
         )
@@ -905,22 +903,13 @@ class Monitor(QWidget):
     def init_video_background(self):
         if not VIDEO_BACKGROUND_AVAILABLE:
             return
-        self.video_widget = QVideoWidget(self)
-        self.video_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.video_widget.hide()
-
-        self.video_overlay = QWidget(self)
-        self.video_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.video_overlay.setStyleSheet(
-            f"background: rgba(10, 12, 14, {VIDEO_OVERLAY_ALPHA});"
-        )
-        self.video_overlay.hide()
-
         self.video_audio = QAudioOutput(self)
         self.video_audio.setVolume(0)
+        self.video_sink = QVideoSink(self)
+        self.video_sink.videoFrameChanged.connect(self.handle_video_frame)
         self.video_player = QMediaPlayer(self)
         self.video_player.setAudioOutput(self.video_audio)
-        self.video_player.setVideoOutput(self.video_widget)
+        self.video_player.setVideoSink(self.video_sink)
         self.video_player.mediaStatusChanged.connect(self.handle_video_status)
         self.video_player.errorOccurred.connect(self.handle_video_error)
 
@@ -931,17 +920,24 @@ class Monitor(QWidget):
         should_play = self.current_skin_key == VIDEO_SKIN_KEY and path and path.exists()
         if not should_play:
             self.video_player.stop()
-            self.video_widget.hide()
-            self.video_overlay.hide()
+            self.video_frame_pixmap = QPixmap()
             self.video_error = ""
+            self.update()
             return
         self.video_error = ""
         self.video_player.setSource(QUrl.fromLocalFile(str(path)))
         self.video_audio.setMuted(True)
         self.video_audio.setVolume(0)
-        self.video_widget.show()
-        self.video_overlay.show()
         self.video_player.play()
+
+    def handle_video_frame(self, frame):
+        if not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        self.video_frame_pixmap = QPixmap.fromImage(image)
+        self.update()
 
     def handle_video_status(self, status):
         if (
@@ -959,22 +955,11 @@ class Monitor(QWidget):
         print(f"Video background failed: {self.video_error}")
         if getattr(self, "video_player", None):
             self.video_player.stop()
-        if getattr(self, "video_widget", None):
-            self.video_widget.hide()
-        if getattr(self, "video_overlay", None):
-            self.video_overlay.hide()
+        self.video_frame_pixmap = QPixmap()
         self.current_skin_key = CUSTOM_SKIN_KEY if self.background_pixmap and not self.background_pixmap.isNull() else DEFAULT_SKIN
         self.apply_skin(save=True)
 
     def sync_background_layers(self):
-        if getattr(self, "video_widget", None):
-            self.video_widget.setGeometry(self.rect())
-            self.video_widget.lower()
-        if getattr(self, "video_overlay", None):
-            self.video_overlay.setGeometry(self.rect())
-            if self.using_custom_video_background():
-                self.video_overlay.show()
-            self.video_overlay.raise_()
         if hasattr(self, "hint_label"):
             self.hint_label.raise_()
         if hasattr(self, "main_scroll"):
@@ -1017,10 +1002,7 @@ class Monitor(QWidget):
         self.config.pop("custom_video_path", None)
         if getattr(self, "video_player", None):
             self.video_player.stop()
-        if getattr(self, "video_widget", None):
-            self.video_widget.hide()
-        if getattr(self, "video_overlay", None):
-            self.video_overlay.hide()
+        self.video_frame_pixmap = QPixmap()
         if self.current_skin_key == VIDEO_SKIN_KEY:
             self.current_skin_key = CUSTOM_SKIN_KEY if self.using_custom_image_background() else DEFAULT_SKIN
         self.apply_skin(save=True)
@@ -1031,7 +1013,19 @@ class Monitor(QWidget):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self.current_skin_key == CUSTOM_SKIN_KEY and not self.background_pixmap.isNull():
+        if self.current_skin_key == VIDEO_SKIN_KEY and not self.video_frame_pixmap.isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            scaled = self.video_frame_pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+            painter.fillRect(self.rect(), QColor(10, 12, 14, VIDEO_OVERLAY_ALPHA))
+        elif self.current_skin_key == CUSTOM_SKIN_KEY and not self.background_pixmap.isNull():
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             scaled = self.background_pixmap.scaled(

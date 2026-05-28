@@ -48,7 +48,7 @@ Tray menu:
 
 - `Background Skin`: choose a preset dashboard background skin. The selected skin is saved to `%APPDATA%\SystemGauges\config.json`.
 - `Background Skin > Custom Image...`: choose a `.png`, `.jpg`, `.jpeg`, `.webp`, or `.bmp` image as the dashboard background. A dark overlay is applied automatically to preserve gauge readability.
-- `Background Skin > Custom Video...`: choose a looping `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`, or `.wmv` video background. Video playback is muted and dimmed so the gauges remain readable.
+- `Background Skin > Custom Video...`: choose a looping `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`, or `.wmv` video background. Video playback is muted, painted behind the gauges, and dimmed so the dashboard remains readable.
 
 Config background keys:
 
