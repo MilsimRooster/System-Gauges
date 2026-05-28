@@ -12,6 +12,7 @@ System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, a
 - Drive activity, SMART temperature, and SMART health for SATA/SSD/NVMe drives.
 - Smooth animated gauge rings with tracer effects.
 - Resizable PyQt6 interface with system tray show/hide/exit actions.
+- Static image backgrounds plus optional silent looping video backgrounds.
 - Background SMART polling so slow disk queries do not freeze the UI.
 
 ## Requirements
@@ -47,6 +48,15 @@ Tray menu:
 
 - `Background Skin`: choose a preset dashboard background skin. The selected skin is saved to `%APPDATA%\SystemGauges\config.json`.
 - `Background Skin > Custom Image...`: choose a `.png`, `.jpg`, `.jpeg`, `.webp`, or `.bmp` image as the dashboard background. A dark overlay is applied automatically to preserve gauge readability.
+- `Background Skin > Custom Video...`: choose a looping `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`, or `.wmv` video background. Video playback is muted and dimmed so the gauges remain readable.
+
+Config background keys:
+
+- `background_type`: `image` or `video`.
+- `custom_image_path`: path to the static image fallback.
+- `custom_video_path`: path to the optional animated video background.
+
+If video playback is unavailable or fails, System Gauges falls back to the saved custom image when one exists, otherwise it returns to the default preset skin.
 
 ## Screenshots
 
@@ -72,7 +82,7 @@ Tray background menu:
 - SMART data is refreshed less often than CPU/GPU/RAM to avoid excessive disk queries.
 - Drive tiles intentionally show activity speed, temperature, and health only.
 - The `nvidia-ml-py` package is imported as `pynvml`; this is expected.
-- Custom background images use a fixed dark overlay in this build; opacity and blur controls are planned for a later pass.
+- Custom image and video backgrounds use a fixed dark overlay in this build; opacity and blur controls are planned for a later pass.
 
 ## Build EXE
 
