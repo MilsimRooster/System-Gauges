@@ -72,6 +72,10 @@ Hybrid:
 
 ![Hybrid mode](full_hybrid.png)
 
+Video background hybrid:
+
+![Hybrid mode with retro video background](full_video_hybrid.png)
+
 Tray background menu:
 
 ![Tray background menu](tray_options.png)
