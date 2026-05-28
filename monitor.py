@@ -6,6 +6,7 @@ import math
 import warnings
 import json
 import os
+import traceback
 from pathlib import Path
 import psutil
 import wmi
@@ -81,13 +82,39 @@ def config_path():
     return base_path / "SystemGauges" / "config.json"
 
 
+def log_path():
+    return config_path().with_name("system_gauges.log")
+
+
+def log_event(message, exc=None):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        path = log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {message}\n")
+            if exc is not None:
+                handle.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
+    print(message)
+
+
+def handle_uncaught_exception(exc_type, exc, tb):
+    log_event("Uncaught exception", exc)
+    sys.__excepthook__(exc_type, exc, tb)
+
+
+sys.excepthook = handle_uncaught_exception
+
+
 def load_config():
     path = config_path()
     try:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"Config load failed: {e}")
+        log_event(f"Config load failed: {e}", e)
     return {}
 
 
@@ -97,7 +124,7 @@ def save_config(config):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     except Exception as e:
-        print(f"Config save failed: {e}")
+        log_event(f"Config save failed: {e}", e)
 
 
 def skin_by_key(key):
@@ -169,7 +196,7 @@ def run_command(cmd):
     except subprocess.TimeoutExpired:
         return ""
     except Exception as e:
-        print(f"Command failed: {' '.join(cmd)} | Error: {e}")
+        log_event(f"Command failed: {' '.join(cmd)} | Error: {e}", e)
         return ""
 
 
@@ -338,7 +365,7 @@ def get_drive_info():
             })
         return sorted(drives, key=lambda drive: drive["index"])
     except Exception as e:
-        print(f"WMI drive lookup failed: {e}")
+        log_event(f"WMI drive lookup failed: {e}", e)
         return []
 
 
@@ -352,11 +379,14 @@ class SmartWorker(QThread):
 
     def run(self):
         results = {}
-        for disk_name, device, dtype in self.disk_devices:
-            reading = parse_smart(device, dtype)
-            if reading == UNKNOWN_SMART and disk_name in self.previous_cache:
-                reading = self.previous_cache[disk_name]
-            results[disk_name] = reading
+        try:
+            for disk_name, device, dtype in self.disk_devices:
+                reading = parse_smart(device, dtype)
+                if reading == UNKNOWN_SMART and disk_name in self.previous_cache:
+                    reading = self.previous_cache[disk_name]
+                results[disk_name] = reading
+        except Exception as e:
+            log_event(f"SMART worker failed: {e}", e)
         self.result_ready.emit(results)
 
 
@@ -672,9 +702,9 @@ class Monitor(QWidget):
         try:
             pynvml.nvmlInit()
             self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            print("NVML GPU initialized")
+            log_event("NVML GPU initialized")
         except Exception as e:
-            print(f"NVML init failed: {e}")
+            log_event(f"NVML init failed: {e}", e)
 
         self.gpu_samples = []
         self.gpu_window_seconds = 1.6
@@ -779,7 +809,7 @@ class Monitor(QWidget):
 
         show.triggered.connect(self.show)
         hide.triggered.connect(self.hide)
-        exit.triggered.connect(QApplication.quit)
+        exit.triggered.connect(self.exit_app)
 
         menu.addAction(show)
         menu.addAction(hide)
@@ -825,14 +855,15 @@ class Monitor(QWidget):
         menu.addAction(exit)
 
         self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self.handle_tray_activated)
         self.tray.show()
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_stats)
+        self.timer.timeout.connect(self.safe_update_stats)
         self.timer.start(REFRESH_MS)
 
         self.anim = QTimer(self)
-        self.anim.timeout.connect(self.animate)
+        self.anim.timeout.connect(self.safe_animate)
         self.anim.start(10)
 
         self.display_mode = 0
@@ -840,6 +871,7 @@ class Monitor(QWidget):
         self.apply_skin(save=False)
 
         QTimer.singleShot(800, self._force_focus)
+        log_event("System Gauges started")
 
     def apply_skin(self, save=True):
         skin = skin_by_key(self.current_skin_key)
@@ -954,7 +986,7 @@ class Monitor(QWidget):
         if error == QMediaPlayer.Error.NoError:
             return
         self.video_error = message or str(error)
-        print(f"Video background failed: {self.video_error}")
+        log_event(f"Video background failed: {self.video_error}")
         if getattr(self, "video_player", None):
             self.video_player.stop()
         self.video_frame_pixmap = QPixmap()
@@ -1045,6 +1077,21 @@ class Monitor(QWidget):
         self.raise_()
         self.setFocus()
 
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
+        log_event("Window close requested; hiding to tray instead")
+
+    def exit_app(self):
+        log_event("Exit selected from tray menu")
+        QApplication.quit()
+
+    def handle_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show()
+            self.activateWindow()
+            self.raise_()
+
     def _sync_modes(self):
         self.gpu.display_mode = self.display_mode
         self.ram.display_mode = self.display_mode
@@ -1096,12 +1143,24 @@ class Monitor(QWidget):
         self.smart_cache.update(results)
         self.smart_worker = None
 
+    def safe_animate(self):
+        try:
+            self.animate()
+        except Exception as e:
+            log_event(f"Animation update failed: {e}", e)
+
     def animate(self):
         self.gpu.tick()
         self.ram.tick()
         self.cpu.tick()
         for g in self.disk_gauges.values():
             g.tick()
+
+    def safe_update_stats(self):
+        try:
+            self.update_stats()
+        except Exception as e:
+            log_event(f"Telemetry update failed: {e}", e)
 
     def update_stats(self):
         # GPU
@@ -1126,7 +1185,7 @@ class Monitor(QWidget):
             else:
                 self.gpu.set_data(0, "0%", "N/A", "", "")
         except Exception as e:
-            print(f"GPU update failed: {e}")
+            log_event(f"GPU update failed: {e}", e)
             self.gpu.set_data(0, "GPU Error", "", "", "")
 
         # CPU
@@ -1138,7 +1197,7 @@ class Monitor(QWidget):
             threads = psutil.cpu_count(logical=True) or 0
             self.cpu.set_data(cpu_pct, f"{cpu_pct:.0f}%", freq_text, f"{cores}C / {threads}T", "CPU Load")
         except Exception as e:
-            print(f"CPU update failed: {e}")
+            log_event(f"CPU update failed: {e}", e)
             cpu_pct = 0
             self.cpu.set_data(0, "CPU Error", "", "", "")
 
@@ -1185,7 +1244,7 @@ class Monitor(QWidget):
 
             self.last = cur
         except Exception as e:
-            print(f"Disk update failed: {e}")
+            log_event(f"Disk update failed: {e}", e)
 
         # RGB
         try:
@@ -1199,10 +1258,13 @@ class Monitor(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     window = Monitor()
     window.resize(840, 540)
     window.show()
     window.activateWindow()
     window.raise_()
     window.setFocus()
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    log_event(f"System Gauges exited with code {exit_code}")
+    sys.exit(exit_code)
