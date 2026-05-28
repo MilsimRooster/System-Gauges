@@ -414,6 +414,8 @@ class Gauge(QWidget):
 
     def uses_image_background(self):
         parent = self.window()
+        if hasattr(parent, "using_rich_background"):
+            return parent.using_rich_background()
         if hasattr(parent, "using_custom_image_background"):
             return parent.using_custom_image_background()
         return self.background_is_image
@@ -543,7 +545,7 @@ class Gauge(QWidget):
 
         if mode == 1:
             waveform_rect = rect.adjusted(8, 8, -8, -8)
-            bg_alpha = 118 if self.uses_image_background() else 255
+            bg_alpha = 72 if self.uses_image_background() else 255
             p.fillRect(waveform_rect, QColor(10, 14, 22, bg_alpha))
             self.draw_waveform(p, waveform_rect, alpha=200, glow=True)
             p.setPen(QColor(160, 220, 255, 220))
