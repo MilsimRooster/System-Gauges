@@ -19,7 +19,7 @@ warnings.filterwarnings(
 import pynvml
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal, QUrl
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon, QPixmap
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -694,7 +694,8 @@ class Monitor(QWidget):
         self.video_player = None
         self.video_audio = None
         self.video_sink = None
-        self.video_frame_pixmap = QPixmap()
+        self.video_frame_image = QImage()
+        self.last_video_frame_update = 0
         self.video_error = ""
         self.init_video_background()
 
@@ -954,7 +955,7 @@ class Monitor(QWidget):
         should_play = self.current_skin_key == VIDEO_SKIN_KEY and path and path.exists()
         if not should_play:
             self.video_player.stop()
-            self.video_frame_pixmap = QPixmap()
+            self.video_frame_image = QImage()
             self.video_error = ""
             self.update()
             return
@@ -967,10 +968,14 @@ class Monitor(QWidget):
     def handle_video_frame(self, frame):
         if not frame.isValid():
             return
+        now = time.monotonic()
+        if now - self.last_video_frame_update < 1 / 30:
+            return
         image = frame.toImage()
         if image.isNull():
             return
-        self.video_frame_pixmap = QPixmap.fromImage(image)
+        self.video_frame_image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
+        self.last_video_frame_update = now
         self.update()
 
     def handle_video_status(self, status):
@@ -989,7 +994,7 @@ class Monitor(QWidget):
         log_event(f"Video background failed: {self.video_error}")
         if getattr(self, "video_player", None):
             self.video_player.stop()
-        self.video_frame_pixmap = QPixmap()
+        self.video_frame_image = QImage()
         self.current_skin_key = CUSTOM_SKIN_KEY if self.background_pixmap and not self.background_pixmap.isNull() else DEFAULT_SKIN
         self.apply_skin(save=True)
 
@@ -1036,7 +1041,7 @@ class Monitor(QWidget):
         self.config.pop("custom_video_path", None)
         if getattr(self, "video_player", None):
             self.video_player.stop()
-        self.video_frame_pixmap = QPixmap()
+        self.video_frame_image = QImage()
         if self.current_skin_key == VIDEO_SKIN_KEY:
             self.current_skin_key = CUSTOM_SKIN_KEY if self.using_custom_image_background() else DEFAULT_SKIN
         self.apply_skin(save=True)
@@ -1047,17 +1052,17 @@ class Monitor(QWidget):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self.current_skin_key == VIDEO_SKIN_KEY and not self.video_frame_pixmap.isNull():
+        if self.current_skin_key == VIDEO_SKIN_KEY and not self.video_frame_image.isNull():
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            scaled = self.video_frame_pixmap.scaled(
+            scaled = self.video_frame_image.scaled(
                 self.size(),
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation
             )
             x = (self.width() - scaled.width()) // 2
             y = (self.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
+            painter.drawImage(x, y, scaled)
             painter.fillRect(self.rect(), QColor(10, 12, 14, VIDEO_OVERLAY_ALPHA))
         elif self.current_skin_key == CUSTOM_SKIN_KEY and not self.background_pixmap.isNull():
             painter = QPainter(self)
