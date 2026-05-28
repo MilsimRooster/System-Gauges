@@ -12,7 +12,7 @@ System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, a
 - Drive activity, SMART temperature, and SMART health for SATA/SSD/NVMe drives.
 - Smooth animated gauge rings with tracer effects.
 - Resizable PyQt6 interface with system tray show/hide/exit actions.
-- Static image backgrounds plus optional silent looping video backgrounds.
+- Static image backgrounds, with video background code disabled in packaged builds after QtMultimedia proved unstable on Windows.
 - Background SMART polling so slow disk queries do not freeze the UI.
 
 ## Requirements
@@ -48,16 +48,16 @@ Tray menu:
 
 - `Background Skin`: choose a preset dashboard background skin. The selected skin is saved to `%APPDATA%\SystemGauges\config.json`.
 - `Background Skin > Custom Image...`: choose a `.png`, `.jpg`, `.jpeg`, `.webp`, or `.bmp` image as the dashboard background. A dark overlay is applied automatically to preserve gauge readability.
-- `Background Skin > Custom Video...`: choose a looping `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`, or `.wmv` video background. Video playback is muted, painted behind the gauges, and dimmed so the dashboard remains readable.
+- `Background Skin > Custom Video unavailable`: video backgrounds are disabled in the packaged EXE because QtMultimedia caused native `Qt6Core.dll` crashes on Windows. Static image backgrounds remain supported.
 - Closing the window hides it to the tray. Use tray `Exit` to fully quit.
 
 Config background keys:
 
-- `background_type`: `image` or `video`.
+- `background_type`: `image`. Saved `video` configs are forced back to `image` on startup for stability.
 - `custom_image_path`: path to the static image fallback.
 - `custom_video_path`: path to the optional animated video background.
 
-If video playback is unavailable or fails, System Gauges falls back to the saved custom image when one exists, otherwise it returns to the default preset skin.
+If a saved video background is present, System Gauges falls back to the saved custom image when one exists, otherwise it returns to the default preset skin.
 
 Runtime log:
 
@@ -91,7 +91,7 @@ Tray background menu:
 - SMART data is refreshed less often than CPU/GPU/RAM to avoid excessive disk queries.
 - Drive tiles intentionally show activity speed, temperature, and health only.
 - The `nvidia-ml-py` package is imported as `pynvml`; this is expected.
-- Custom image and video backgrounds use a fixed dark overlay in this build; opacity and blur controls are planned for a later pass.
+- Custom image backgrounds use a fixed dark overlay in this build; opacity and blur controls are planned for a later pass.
 
 ## Build EXE
 

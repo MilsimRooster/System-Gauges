@@ -33,15 +33,10 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QFileDialog
 )
-try:
-    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
-    VIDEO_BACKGROUND_AVAILABLE = True
-except Exception as e:
-    QAudioOutput = None
-    QMediaPlayer = None
-    QVideoSink = None
-    VIDEO_BACKGROUND_AVAILABLE = False
-    print(f"Video background support unavailable: {e}")
+QAudioOutput = None
+QMediaPlayer = None
+QVideoSink = None
+VIDEO_BACKGROUND_AVAILABLE = False
 
 REFRESH_MS = 150
 SMART_REFRESH_SECONDS = 4
@@ -677,7 +672,9 @@ class Monitor(QWidget):
         self.config = load_config()
         self.current_skin_key = self.config.get("skin", DEFAULT_SKIN)
         if self.config.get("background_type") == "video" and custom_video_path(self.config):
-            self.current_skin_key = VIDEO_SKIN_KEY
+            self.config["background_type"] = "image"
+            self.current_skin_key = CUSTOM_SKIN_KEY if custom_image_path(self.config) else DEFAULT_SKIN
+            save_config(self.config)
         if self.current_skin_key not in SKINS and self.current_skin_key not in (CUSTOM_SKIN_KEY, VIDEO_SKIN_KEY):
             self.current_skin_key = DEFAULT_SKIN
         self.skin_actions = {}
@@ -841,7 +838,7 @@ class Monitor(QWidget):
         skin_menu.addAction(self.clear_custom_image_action)
 
         skin_menu.addSeparator()
-        self.custom_video_action = QAction("Custom Video...", self)
+        self.custom_video_action = QAction("Custom Video unavailable", self)
         self.custom_video_action.setCheckable(True)
         self.custom_video_action.setChecked(self.current_skin_key == VIDEO_SKIN_KEY)
         self.custom_video_action.triggered.connect(self.choose_custom_video)
@@ -937,6 +934,7 @@ class Monitor(QWidget):
 
     def init_video_background(self):
         if not VIDEO_BACKGROUND_AVAILABLE:
+            log_event("Video background disabled because QtMultimedia was unstable in the packaged EXE")
             return
         self.video_audio = QAudioOutput(self)
         self.video_audio.setVolume(0)
@@ -979,6 +977,8 @@ class Monitor(QWidget):
         self.update()
 
     def handle_video_status(self, status):
+        if not VIDEO_BACKGROUND_AVAILABLE:
+            return
         if (
             getattr(self, "video_player", None)
             and status == QMediaPlayer.MediaStatus.EndOfMedia
@@ -988,6 +988,8 @@ class Monitor(QWidget):
             self.video_player.play()
 
     def handle_video_error(self, error, message):
+        if not VIDEO_BACKGROUND_AVAILABLE:
+            return
         if error == QMediaPlayer.Error.NoError:
             return
         self.video_error = message or str(error)
@@ -1018,7 +1020,9 @@ class Monitor(QWidget):
     def choose_custom_video(self):
         if not VIDEO_BACKGROUND_AVAILABLE:
             self.current_skin_key = CUSTOM_SKIN_KEY if self.using_custom_image_background() else DEFAULT_SKIN
+            self.config["background_type"] = "image"
             self.apply_skin(save=True)
+            log_event("Custom video requested, but QtMultimedia video backgrounds are disabled")
             return
         start_dir = str(custom_video_path(self.config).parent) if custom_video_path(self.config) else str(Path.home())
         filename, _ = QFileDialog.getOpenFileName(self, "Choose Background Video", start_dir, CUSTOM_VIDEO_FILTER)
