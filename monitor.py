@@ -207,6 +207,40 @@ def c_to_f(c):
         return "?" 
 
 
+def safe_nvml_read(read_fn, fallback=None):
+    try:
+        return read_fn()
+    except Exception as e:
+        log_event(f"Optional NVML metric unavailable: {e}")
+        return fallback
+
+
+def decode_nvml_name(name):
+    if isinstance(name, bytes):
+        return name.decode("utf-8", errors="replace")
+    return str(name)
+
+
+def select_nvml_gpu_handle():
+    pynvml.nvmlInit()
+    count = pynvml.nvmlDeviceGetCount()
+    preferred_terms = ("rtx", "gtx", "nvidia", "geforce", "quadro")
+    first_handle = None
+    first_name = ""
+    for index in range(count):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+        name = decode_nvml_name(pynvml.nvmlDeviceGetName(handle))
+        log_event(f"NVML GPU candidate {index}: {name}")
+        if first_handle is None:
+            first_handle = handle
+            first_name = name
+        if any(term in name.lower() for term in preferred_terms):
+            return handle, name
+    if first_handle is None:
+        raise RuntimeError("No NVML GPU devices found")
+    return first_handle, first_name
+
+
 def format_temp(c):
     f = c_to_f(c)
     return f"Temp {f}°F" if f != "?" else "Temp N/A"
@@ -657,16 +691,25 @@ class Gauge(QWidget):
         tracer_width = max(5, int(size * (0.037 if compact else 0.041)))
 
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 18), glow_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 20), glow_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawArc(arc, 0, 360 * 16)
 
-        p.setPen(QPen(QColor(48, 54, 52), track_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        track_alpha = 132 if self.uses_image_background() else 118
+        p.setPen(QPen(QColor(6, 12, 16, track_alpha), track_width + 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawArc(arc, 0, 360 * 16)
+        p.setPen(QPen(QColor(210, 255, 246, 42), max(2, int(track_width * 0.36)), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(arc, 22 * 16, 116 * 16)
+        p.setPen(QPen(QColor(255, 255, 255, 32), max(2, int(track_width * 0.22)), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(arc, 205 * 16, 70 * 16)
+        p.setPen(QPen(QColor(0, 0, 0, 70), max(2, int(track_width * 0.28)), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(arc, 300 * 16, 90 * 16)
 
         span = max(0.0, min(360.0, 360.0 * self.value / 100.0))
         if span > 0.2:
             span16 = int(span * 16)
-            p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 46), glow_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 54), glow_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(arc, 90 * 16, -span16)
+            p.setPen(QPen(QColor(225, 255, 247, 30), max(track_width + 4, int(glow_width * 0.62)), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawArc(arc, 90 * 16, -span16)
 
             tail = min(span, 48.0 if compact else 58.0)
@@ -679,8 +722,16 @@ class Gauge(QWidget):
                 p.setPen(pen)
                 p.drawArc(arc, int((90 - seg_start) * 16), -int((seg_end - seg_start) * 16))
 
-            p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 230), max(4, int(size * (0.026 if compact else 0.030))), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            active_width = max(4, int(size * (0.030 if compact else 0.034)))
+            p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 224), active_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawArc(arc, 90 * 16, -span16)
+            p.setPen(QPen(QColor(245, 255, 252, 150), max(2, int(active_width * 0.36)), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(arc, 90 * 16, -span16)
+
+            shine_span = min(34.0 if compact else 42.0, max(8.0, span * 0.28))
+            shine_start = 90.0 - span + shine_span + 5.0
+            p.setPen(QPen(QColor(255, 255, 255, 205), max(2, int(active_width * 0.24)), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(arc, int(shine_start * 16), -int(shine_span * 16))
 
             ring_radius = arc.width() / 2.0
             end_angle = math.radians(90.0 - span)
@@ -690,10 +741,12 @@ class Gauge(QWidget):
             )
             head_radius = max(3.8, tracer_width * (0.54 if compact else 0.58))
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(base.red(), base.green(), base.blue(), 46 if compact else 58))
-            p.drawEllipse(head, head_radius * 1.85, head_radius * 1.85)
-            p.setBrush(QColor(base.red(), base.green(), base.blue(), 215))
+            p.setBrush(QColor(base.red(), base.green(), base.blue(), 56 if compact else 68))
+            p.drawEllipse(head, head_radius * 2.05, head_radius * 2.05)
+            p.setBrush(QColor(base.red(), base.green(), base.blue(), 218))
             p.drawEllipse(head, head_radius, head_radius)
+            p.setBrush(QColor(255, 255, 255, 172))
+            p.drawEllipse(head, max(1.6, head_radius * 0.38), max(1.6, head_radius * 0.38))
 
         p.setPen(Qt.GlobalColor.white)
 
@@ -805,6 +858,10 @@ class Monitor(QWidget):
         if self.current_skin_key not in SKINS and self.current_skin_key not in (CUSTOM_SKIN_KEY, VIDEO_SKIN_KEY):
             self.current_skin_key = DEFAULT_SKIN
         self.skin_actions = {}
+        self.custom_image_actions = []
+        self.clear_custom_image_actions = []
+        self.custom_video_actions = []
+        self.clear_custom_video_actions = []
         self.custom_image_action = None
         self.clear_custom_image_action = None
         self.custom_video_action = None
@@ -825,11 +882,14 @@ class Monitor(QWidget):
         self.init_video_background()
 
         self.gpu_handle = None
+        self.gpu_name = ""
+        self.last_gpu_init_attempt = 0
+        self.gpu_init_retry_seconds = 10
         try:
-            pynvml.nvmlInit()
-            self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            log_event("NVML GPU initialized")
+            self.gpu_handle, self.gpu_name = select_nvml_gpu_handle()
+            log_event(f"NVML GPU initialized: {self.gpu_name}")
         except Exception as e:
+            self.last_gpu_init_attempt = time.time()
             log_event(f"NVML init failed: {e}", e)
 
         self.gpu_samples = []
@@ -853,6 +913,36 @@ class Monitor(QWidget):
         self.smart_paths = {drive["psutil"]: drive["smart"] for drive in drive_info}
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        top_bar = QWidget()
+        top_bar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        top_bar.setAutoFillBackground(False)
+        top_bar_layout = QHBoxLayout(top_bar)
+        top_bar_layout.setContentsMargins(2, 0, 2, 0)
+        top_bar_layout.setSpacing(8)
+
+        self.background_button = QPushButton("Background")
+        self.background_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.background_button.setStyleSheet("""
+            QPushButton {
+                color: #dff4ff;
+                background: rgba(17, 26, 42, 190);
+                border: 1px solid rgba(169, 216, 255, 145);
+                border-radius: 5px;
+                padding: 5px 10px;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: rgba(35, 72, 106, 220);
+                border-color: rgba(144, 220, 255, 205);
+            }
+        """)
+        top_bar_layout.addStretch(1)
+        top_bar_layout.addWidget(self.background_button)
+        layout.addWidget(top_bar)
 
         self.main_scroll = QScrollArea()
         self.main_scroll.setWidgetResizable(True)
@@ -993,41 +1083,8 @@ class Monitor(QWidget):
         menu.addAction(self.top_hogs_action)
         menu.addSeparator()
 
-        skin_menu = menu.addMenu("Background Skin")
-        self.skin_group = QActionGroup(self)
-        self.skin_group.setExclusive(True)
-        for key, skin in SKINS.items():
-            action = QAction(skin["name"], self)
-            action.setCheckable(True)
-            action.setChecked(key == self.current_skin_key)
-            action.triggered.connect(lambda checked=False, skin_key=key: self.set_skin(skin_key))
-            self.skin_group.addAction(action)
-            skin_menu.addAction(action)
-            self.skin_actions[key] = action
-
-        skin_menu.addSeparator()
-        self.custom_image_action = QAction("Custom Image/GIF...", self)
-        self.custom_image_action.setCheckable(True)
-        self.custom_image_action.setChecked(self.current_skin_key == CUSTOM_SKIN_KEY)
-        self.custom_image_action.triggered.connect(self.choose_custom_image)
-        self.skin_group.addAction(self.custom_image_action)
-        skin_menu.addAction(self.custom_image_action)
-
-        self.clear_custom_image_action = QAction("Clear Custom Image/GIF", self)
-        self.clear_custom_image_action.triggered.connect(self.clear_custom_image)
-        skin_menu.addAction(self.clear_custom_image_action)
-
-        skin_menu.addSeparator()
-        self.custom_video_action = QAction("Custom Video unavailable", self)
-        self.custom_video_action.setCheckable(True)
-        self.custom_video_action.setChecked(self.current_skin_key == VIDEO_SKIN_KEY)
-        self.custom_video_action.triggered.connect(self.choose_custom_video)
-        self.skin_group.addAction(self.custom_video_action)
-        skin_menu.addAction(self.custom_video_action)
-
-        self.clear_custom_video_action = QAction("Clear Custom Video", self)
-        self.clear_custom_video_action.triggered.connect(self.clear_custom_video)
-        skin_menu.addAction(self.clear_custom_video_action)
+        menu.addMenu(self.create_background_menu("Background Skin"))
+        self.background_button.setMenu(self.create_background_menu("Background"))
 
         menu.addSeparator()
         menu.addAction(exit)
@@ -1051,6 +1108,48 @@ class Monitor(QWidget):
         QTimer.singleShot(800, self._force_focus)
         log_event("System Gauges started")
 
+    def create_background_menu(self, title):
+        skin_menu = QMenu(title, self)
+        skin_group = QActionGroup(skin_menu)
+        skin_group.setExclusive(True)
+        for key, skin in SKINS.items():
+            action = QAction(skin["name"], skin_menu)
+            action.setCheckable(True)
+            action.setChecked(key == self.current_skin_key)
+            action.triggered.connect(lambda checked=False, skin_key=key: self.set_skin(skin_key))
+            skin_group.addAction(action)
+            skin_menu.addAction(action)
+            self.skin_actions.setdefault(key, []).append(action)
+
+        skin_menu.addSeparator()
+        self.custom_image_action = QAction("Custom Image/GIF...", skin_menu)
+        self.custom_image_action.setCheckable(True)
+        self.custom_image_action.setChecked(self.current_skin_key == CUSTOM_SKIN_KEY)
+        self.custom_image_action.triggered.connect(self.choose_custom_image)
+        skin_group.addAction(self.custom_image_action)
+        skin_menu.addAction(self.custom_image_action)
+        self.custom_image_actions.append(self.custom_image_action)
+
+        self.clear_custom_image_action = QAction("Clear Custom Image/GIF", skin_menu)
+        self.clear_custom_image_action.triggered.connect(self.clear_custom_image)
+        skin_menu.addAction(self.clear_custom_image_action)
+        self.clear_custom_image_actions.append(self.clear_custom_image_action)
+
+        skin_menu.addSeparator()
+        self.custom_video_action = QAction("Custom Video unavailable", skin_menu)
+        self.custom_video_action.setCheckable(True)
+        self.custom_video_action.setChecked(self.current_skin_key == VIDEO_SKIN_KEY)
+        self.custom_video_action.triggered.connect(self.choose_custom_video)
+        skin_group.addAction(self.custom_video_action)
+        skin_menu.addAction(self.custom_video_action)
+        self.custom_video_actions.append(self.custom_video_action)
+
+        self.clear_custom_video_action = QAction("Clear Custom Video", skin_menu)
+        self.clear_custom_video_action.triggered.connect(self.clear_custom_video)
+        skin_menu.addAction(self.clear_custom_video_action)
+        self.clear_custom_video_actions.append(self.clear_custom_video_action)
+        return skin_menu
+
     def apply_skin(self, save=True):
         skin = skin_by_key(self.current_skin_key)
         self.setStyleSheet(window_style(skin))
@@ -1062,19 +1161,22 @@ class Monitor(QWidget):
             for gauge in self.disk_gauges.values():
                 gauge.background_is_image = is_image
         if hasattr(self, "skin_actions"):
-            for key, action in self.skin_actions.items():
-                action.setChecked(key == self.current_skin_key)
-        if hasattr(self, "custom_image_action") and self.custom_image_action:
-            self.custom_image_action.setChecked(self.current_skin_key == CUSTOM_SKIN_KEY)
-        if hasattr(self, "clear_custom_image_action") and self.clear_custom_image_action:
+            for key, actions in self.skin_actions.items():
+                if not isinstance(actions, list):
+                    actions = [actions]
+                for action in actions:
+                    action.setChecked(key == self.current_skin_key)
+        for action in getattr(self, "custom_image_actions", []):
+            action.setChecked(self.current_skin_key == CUSTOM_SKIN_KEY)
+        for action in getattr(self, "clear_custom_image_actions", []):
             has_custom = bool(custom_image_path(self.config))
-            self.clear_custom_image_action.setEnabled(has_custom)
-        if hasattr(self, "custom_video_action") and self.custom_video_action:
-            self.custom_video_action.setChecked(self.current_skin_key == VIDEO_SKIN_KEY)
-            self.custom_video_action.setEnabled(VIDEO_BACKGROUND_AVAILABLE)
-        if hasattr(self, "clear_custom_video_action") and self.clear_custom_video_action:
+            action.setEnabled(has_custom)
+        for action in getattr(self, "custom_video_actions", []):
+            action.setChecked(self.current_skin_key == VIDEO_SKIN_KEY)
+            action.setEnabled(VIDEO_BACKGROUND_AVAILABLE)
+        for action in getattr(self, "clear_custom_video_actions", []):
             has_video = bool(custom_video_path(self.config))
-            self.clear_custom_video_action.setEnabled(has_video)
+            action.setEnabled(has_video)
         self.update_video_background()
         if save:
             self.config["skin"] = self.current_skin_key
@@ -1438,6 +1540,14 @@ class Monitor(QWidget):
     def update_stats(self):
         # GPU
         try:
+            if not self.gpu_handle and time.time() - self.last_gpu_init_attempt >= self.gpu_init_retry_seconds:
+                self.last_gpu_init_attempt = time.time()
+                try:
+                    self.gpu_handle, self.gpu_name = select_nvml_gpu_handle()
+                    log_event(f"NVML GPU initialized: {self.gpu_name}")
+                except Exception as e:
+                    log_event(f"NVML retry failed: {e}", e)
+
             if self.gpu_handle:
                 util = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
                 temp = pynvml.nvmlDeviceGetTemperature(self.gpu_handle, pynvml.NVML_TEMPERATURE_GPU)
@@ -1451,10 +1561,11 @@ class Monitor(QWidget):
                 mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
                 vram_used_gb = mem_info.used / (1024 ** 3)
                 vram_total_gb = mem_info.total / (1024 ** 3)
-                power_w = pynvml.nvmlDeviceGetPowerUsage(self.gpu_handle) / 1000.0
+                power_mw = safe_nvml_read(lambda: pynvml.nvmlDeviceGetPowerUsage(self.gpu_handle))
+                power_text = f"{power_mw / 1000.0:.0f} W" if power_mw is not None else "Power N/A"
 
                 self.gpu.set_data(gpu_display, f"{gpu_display:.0f}%", f"{c_to_f(temp)}°F",
-                                  f"VRAM {vram_used_gb:.1f}/{vram_total_gb:.1f} GB", f"{power_w:.0f} W")
+                                  f"VRAM {vram_used_gb:.1f}/{vram_total_gb:.1f} GB", power_text)
             else:
                 self.gpu.set_data(0, "0%", "N/A", "", "")
         except Exception as e:
