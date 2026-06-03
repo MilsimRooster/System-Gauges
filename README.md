@@ -1,6 +1,6 @@
 # System Gauges
 
-System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, and SMART-enabled storage. It uses animated circular gauges, adaptive sizing, and a compact `3 up top / 4 below` dashboard layout.
+System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, and SMART-enabled storage. It uses animated circular gauges, adaptive sizing, and a compact dashboard layout.
 
 ![System Gauges classic mode with custom background](full_classic.png)
 
