@@ -10,6 +10,8 @@ class BackgroundButtonSourceTests(unittest.TestCase):
         self.assertIn('QPushButton("Background")', source)
         self.assertIn("create_background_menu", source)
         self.assertIn("self.background_button.setMenu", source)
+        self.assertNotIn("Custom Video unavailable", source)
+        self.assertNotIn("Clear Custom Video", source)
 
 
 if __name__ == "__main__":

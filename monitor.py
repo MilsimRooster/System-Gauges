@@ -18,8 +18,8 @@ warnings.filterwarnings(
 )
 import pynvml
 
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal, QUrl
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon, QPixmap, QImage, QMovie
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon, QPixmap, QMovie
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -36,11 +36,6 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QFileDialog
 )
-QAudioOutput = None
-QMediaPlayer = None
-QVideoSink = None
-VIDEO_BACKGROUND_AVAILABLE = False
-
 REFRESH_MS = 150
 SMART_REFRESH_SECONDS = 4
 PROCESS_HOG_REFRESH_SECONDS = 5
@@ -50,11 +45,8 @@ UNKNOWN_SMART = ("?", "N/A")
 SMART_DEBUG = False
 DEFAULT_SKIN = "graphite"
 CUSTOM_SKIN_KEY = "custom_image"
-VIDEO_SKIN_KEY = "custom_video"
 CUSTOM_IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
-CUSTOM_VIDEO_FILTER = "Videos (*.mp4 *.mov *.m4v *.avi *.mkv *.webm *.wmv)"
 CUSTOM_IMAGE_OVERLAY_ALPHA = 132
-VIDEO_OVERLAY_ALPHA = 138
 
 SKINS = {
     "graphite": {"name": "Graphite", "background": "#17191c", "panel": "#111a2a", "text": "#f3fbff", "hint": "#a9d8ff"},
@@ -133,11 +125,6 @@ def skin_by_key(key):
 
 def custom_image_path(config):
     path = config.get("custom_image_path", "")
-    return Path(path) if path else None
-
-
-def custom_video_path(config):
-    path = config.get("custom_video_path", "")
     return Path(path) if path else None
 
 
@@ -851,21 +838,18 @@ class Monitor(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.config = load_config()
         self.current_skin_key = self.config.get("skin", DEFAULT_SKIN)
-        if self.config.get("background_type") == "video" and custom_video_path(self.config):
+        if self.config.get("background_type") == "video":
             self.config["background_type"] = "image"
+            self.config.pop("custom_video_path", None)
             self.current_skin_key = CUSTOM_SKIN_KEY if custom_image_path(self.config) else DEFAULT_SKIN
             save_config(self.config)
-        if self.current_skin_key not in SKINS and self.current_skin_key not in (CUSTOM_SKIN_KEY, VIDEO_SKIN_KEY):
+        if self.current_skin_key not in SKINS and self.current_skin_key != CUSTOM_SKIN_KEY:
             self.current_skin_key = DEFAULT_SKIN
         self.skin_actions = {}
         self.custom_image_actions = []
         self.clear_custom_image_actions = []
-        self.custom_video_actions = []
-        self.clear_custom_video_actions = []
         self.custom_image_action = None
         self.clear_custom_image_action = None
-        self.custom_video_action = None
-        self.clear_custom_video_action = None
         self.background_pixmap = QPixmap()
         self.background_movie = None
         self.load_background_image()
@@ -873,14 +857,6 @@ class Monitor(QWidget):
         self.app_icon = QIcon(str(resource_path("app_1.ico")))
         if not self.app_icon.isNull():
             self.setWindowIcon(self.app_icon)
-        self.video_player = None
-        self.video_audio = None
-        self.video_sink = None
-        self.video_frame_image = QImage()
-        self.last_video_frame_update = 0
-        self.video_error = ""
-        self.init_video_background()
-
         self.gpu_handle = None
         self.gpu_name = ""
         self.last_gpu_init_attempt = 0
@@ -1134,20 +1110,6 @@ class Monitor(QWidget):
         self.clear_custom_image_action.triggered.connect(self.clear_custom_image)
         skin_menu.addAction(self.clear_custom_image_action)
         self.clear_custom_image_actions.append(self.clear_custom_image_action)
-
-        skin_menu.addSeparator()
-        self.custom_video_action = QAction("Custom Video unavailable", skin_menu)
-        self.custom_video_action.setCheckable(True)
-        self.custom_video_action.setChecked(self.current_skin_key == VIDEO_SKIN_KEY)
-        self.custom_video_action.triggered.connect(self.choose_custom_video)
-        skin_group.addAction(self.custom_video_action)
-        skin_menu.addAction(self.custom_video_action)
-        self.custom_video_actions.append(self.custom_video_action)
-
-        self.clear_custom_video_action = QAction("Clear Custom Video", skin_menu)
-        self.clear_custom_video_action.triggered.connect(self.clear_custom_video)
-        skin_menu.addAction(self.clear_custom_video_action)
-        self.clear_custom_video_actions.append(self.clear_custom_video_action)
         return skin_menu
 
     def apply_skin(self, save=True):
@@ -1171,16 +1133,9 @@ class Monitor(QWidget):
         for action in getattr(self, "clear_custom_image_actions", []):
             has_custom = bool(custom_image_path(self.config))
             action.setEnabled(has_custom)
-        for action in getattr(self, "custom_video_actions", []):
-            action.setChecked(self.current_skin_key == VIDEO_SKIN_KEY)
-            action.setEnabled(VIDEO_BACKGROUND_AVAILABLE)
-        for action in getattr(self, "clear_custom_video_actions", []):
-            has_video = bool(custom_video_path(self.config))
-            action.setEnabled(has_video)
-        self.update_video_background()
         if save:
             self.config["skin"] = self.current_skin_key
-            self.config["background_type"] = "video" if self.current_skin_key == VIDEO_SKIN_KEY else "image"
+            self.config["background_type"] = "image"
             save_config(self.config)
         self.sync_background_layers()
         self.update()
@@ -1190,16 +1145,8 @@ class Monitor(QWidget):
         has_animated_image = bool(self.background_movie and self.background_movie.isValid())
         return self.current_skin_key == CUSTOM_SKIN_KEY and (has_static_image or has_animated_image)
 
-    def using_custom_video_background(self):
-        return (
-            self.current_skin_key == VIDEO_SKIN_KEY
-            and VIDEO_BACKGROUND_AVAILABLE
-            and bool(custom_video_path(self.config))
-            and not getattr(self, "video_error", "")
-        )
-
     def using_rich_background(self):
-        return self.using_custom_image_background() or self.using_custom_video_background()
+        return self.using_custom_image_background()
 
     def set_skin(self, skin_key):
         if skin_key not in SKINS:
@@ -1232,74 +1179,6 @@ class Monitor(QWidget):
             self.background_movie.deleteLater()
             self.background_movie = None
 
-    def init_video_background(self):
-        if not VIDEO_BACKGROUND_AVAILABLE:
-            log_event("Video background disabled because QtMultimedia was unstable in the packaged EXE")
-            return
-        self.video_audio = QAudioOutput(self)
-        self.video_audio.setVolume(0)
-        self.video_sink = QVideoSink(self)
-        self.video_sink.videoFrameChanged.connect(self.handle_video_frame)
-        self.video_player = QMediaPlayer(self)
-        self.video_player.setAudioOutput(self.video_audio)
-        self.video_player.setVideoSink(self.video_sink)
-        self.video_player.mediaStatusChanged.connect(self.handle_video_status)
-        self.video_player.errorOccurred.connect(self.handle_video_error)
-
-    def update_video_background(self):
-        if not VIDEO_BACKGROUND_AVAILABLE or not getattr(self, "video_player", None):
-            return
-        path = custom_video_path(self.config)
-        should_play = self.current_skin_key == VIDEO_SKIN_KEY and path and path.exists()
-        if not should_play:
-            self.video_player.stop()
-            self.video_frame_image = QImage()
-            self.video_error = ""
-            self.update()
-            return
-        self.video_error = ""
-        self.video_player.setSource(QUrl.fromLocalFile(str(path)))
-        self.video_audio.setMuted(True)
-        self.video_audio.setVolume(0)
-        self.video_player.play()
-
-    def handle_video_frame(self, frame):
-        if not frame.isValid():
-            return
-        now = time.monotonic()
-        if now - self.last_video_frame_update < 1 / 30:
-            return
-        image = frame.toImage()
-        if image.isNull():
-            return
-        self.video_frame_image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
-        self.last_video_frame_update = now
-        self.update()
-
-    def handle_video_status(self, status):
-        if not VIDEO_BACKGROUND_AVAILABLE:
-            return
-        if (
-            getattr(self, "video_player", None)
-            and status == QMediaPlayer.MediaStatus.EndOfMedia
-            and self.current_skin_key == VIDEO_SKIN_KEY
-        ):
-            self.video_player.setPosition(0)
-            self.video_player.play()
-
-    def handle_video_error(self, error, message):
-        if not VIDEO_BACKGROUND_AVAILABLE:
-            return
-        if error == QMediaPlayer.Error.NoError:
-            return
-        self.video_error = message or str(error)
-        log_event(f"Video background failed: {self.video_error}")
-        if getattr(self, "video_player", None):
-            self.video_player.stop()
-        self.video_frame_image = QImage()
-        self.current_skin_key = CUSTOM_SKIN_KEY if self.background_pixmap and not self.background_pixmap.isNull() else DEFAULT_SKIN
-        self.apply_skin(save=True)
-
     def sync_background_layers(self):
         if hasattr(self, "main_scroll"):
             self.main_scroll.raise_()
@@ -1315,23 +1194,6 @@ class Monitor(QWidget):
         self.load_background_image()
         self.apply_skin(save=True)
 
-    def choose_custom_video(self):
-        if not VIDEO_BACKGROUND_AVAILABLE:
-            self.current_skin_key = CUSTOM_SKIN_KEY if self.using_custom_image_background() else DEFAULT_SKIN
-            self.config["background_type"] = "image"
-            self.apply_skin(save=True)
-            log_event("Custom video requested, but QtMultimedia video backgrounds are disabled")
-            return
-        start_dir = str(custom_video_path(self.config).parent) if custom_video_path(self.config) else str(Path.home())
-        filename, _ = QFileDialog.getOpenFileName(self, "Choose Background Video", start_dir, CUSTOM_VIDEO_FILTER)
-        if not filename:
-            self.apply_skin(save=False)
-            return
-        self.config["custom_video_path"] = filename
-        self.config["background_type"] = "video"
-        self.current_skin_key = VIDEO_SKIN_KEY
-        self.apply_skin(save=True)
-
     def clear_custom_image(self):
         self.config.pop("custom_image_path", None)
         self.stop_background_movie()
@@ -1340,34 +1202,13 @@ class Monitor(QWidget):
             self.current_skin_key = DEFAULT_SKIN
         self.apply_skin(save=True)
 
-    def clear_custom_video(self):
-        self.config.pop("custom_video_path", None)
-        if getattr(self, "video_player", None):
-            self.video_player.stop()
-        self.video_frame_image = QImage()
-        if self.current_skin_key == VIDEO_SKIN_KEY:
-            self.current_skin_key = CUSTOM_SKIN_KEY if self.using_custom_image_background() else DEFAULT_SKIN
-        self.apply_skin(save=True)
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.sync_background_layers()
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self.current_skin_key == VIDEO_SKIN_KEY and not self.video_frame_image.isNull():
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            scaled = self.video_frame_image.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            painter.drawImage(x, y, scaled)
-            painter.fillRect(self.rect(), QColor(10, 12, 14, VIDEO_OVERLAY_ALPHA))
-        elif self.current_skin_key == CUSTOM_SKIN_KEY and self.using_custom_image_background():
+        if self.current_skin_key == CUSTOM_SKIN_KEY and self.using_custom_image_background():
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             background_pixmap = self.background_movie.currentPixmap() if self.background_movie else self.background_pixmap

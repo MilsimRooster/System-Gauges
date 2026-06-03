@@ -12,7 +12,7 @@ System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, a
 - Drive activity, SMART temperature, and SMART health for SATA/SSD/NVMe drives.
 - Smooth animated gauge rings with tracer effects.
 - Resizable PyQt6 interface with system tray show/hide/exit actions.
-- Static image backgrounds plus animated GIF backgrounds, with video background code disabled in packaged builds after QtMultimedia proved unstable on Windows.
+- Static image backgrounds plus animated GIF backgrounds.
 - Background SMART polling so slow disk queries do not freeze the UI.
 
 ## Requirements
@@ -48,16 +48,14 @@ Tray menu:
 
 - `Background Skin`: choose a preset dashboard background skin. The selected skin is saved to `%APPDATA%\SystemGauges\config.json`.
 - `Background Skin > Custom Image...`: choose a `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, or animated `.gif` image as the dashboard background. A dark overlay is applied automatically to preserve gauge readability.
-- `Background Skin > Custom Video unavailable`: video backgrounds are disabled in the packaged EXE because QtMultimedia caused native `Qt6Core.dll` crashes on Windows. Static image backgrounds remain supported.
 - Closing the window hides it to the tray. Use tray `Exit` to fully quit.
 
 Config background keys:
 
-- `background_type`: `image`. Saved `video` configs are forced back to `image` on startup for stability.
+- `background_type`: `image`. Saved legacy `video` configs are forced back to `image` on startup for stability.
 - `custom_image_path`: path to the static image or animated GIF fallback.
-- `custom_video_path`: path to the optional animated video background.
 
-If a saved video background is present, System Gauges falls back to the saved custom image when one exists, otherwise it returns to the default preset skin.
+If a saved legacy video background is present, System Gauges falls back to the saved custom image when one exists, otherwise it returns to the default preset skin.
 
 Runtime log:
 
@@ -77,13 +75,9 @@ Hybrid:
 
 ![Hybrid mode](full_hybrid.png)
 
-Video background hybrid:
+Top Hogs:
 
-![Hybrid mode with retro video background](full_video_hybrid.png)
-
-Tray background menu:
-
-![Tray background menu](tray_options.png)
+![Top Hogs panel](tray_options.png)
 
 ## Notes
 
