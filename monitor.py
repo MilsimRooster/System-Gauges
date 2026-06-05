@@ -19,7 +19,21 @@ warnings.filterwarnings(
 import pynvml
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QAction, QActionGroup, QRadialGradient, QBrush, QIcon, QPixmap, QMovie
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QBrush,
+    QColor,
+    QFont,
+    QIcon,
+    QLinearGradient,
+    QMovie,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -630,6 +644,69 @@ class Gauge(QWidget):
             painter.setPen(QPen(color, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawLine(inner, outer)
 
+    def draw_liquid_glass_surface(self, painter: QPainter, square: QRectF, arc: QRectF, size: int, compact: bool):
+        glass_rect = QRectF(square).adjusted(size * 0.055, size * 0.055, -size * 0.055, -size * 0.055)
+        glass_path = QPainterPath()
+        glass_path.addEllipse(glass_rect)
+
+        body = QRadialGradient(
+            glass_rect.left() + glass_rect.width() * 0.34,
+            glass_rect.top() + glass_rect.height() * 0.20,
+            glass_rect.width() * 0.72,
+        )
+        body.setColorAt(0.00, QColor(255, 255, 255, 44 if compact else 52))
+        body.setColorAt(0.22, QColor(104, 176, 208, 34 if compact else 42))
+        body.setColorAt(0.58, QColor(8, 18, 30, 86 if self.uses_image_background() else 112))
+        body.setColorAt(1.00, QColor(1, 7, 13, 124 if self.uses_image_background() else 152))
+        painter.fillPath(glass_path, QBrush(body))
+
+        haze = QLinearGradient(glass_rect.left(), glass_rect.top(), glass_rect.right(), glass_rect.bottom())
+        haze.setColorAt(0.00, QColor(255, 255, 255, 78 if compact else 88))
+        haze.setColorAt(0.20, QColor(225, 250, 255, 28))
+        haze.setColorAt(0.58, QColor(255, 255, 255, 4))
+        haze.setColorAt(1.00, QColor(4, 12, 20, 70))
+        painter.fillPath(glass_path, QBrush(haze))
+
+        glare = QRadialGradient(
+            glass_rect.left() + glass_rect.width() * 0.20,
+            glass_rect.top() + glass_rect.height() * 0.13,
+            glass_rect.width() * 0.34,
+        )
+        glare.setColorAt(0.00, QColor(255, 255, 255, 102 if compact else 122))
+        glare.setColorAt(0.34, QColor(255, 255, 255, 30))
+        glare.setColorAt(1.00, QColor(255, 255, 255, 0))
+        painter.fillPath(glass_path, QBrush(glare))
+
+        bottom_glare = QRadialGradient(
+            glass_rect.left() + glass_rect.width() * 0.78,
+            glass_rect.bottom() - glass_rect.height() * 0.10,
+            glass_rect.width() * 0.28,
+        )
+        bottom_glare.setColorAt(0.00, QColor(255, 255, 255, 58 if compact else 70))
+        bottom_glare.setColorAt(0.24, QColor(155, 237, 255, 25))
+        bottom_glare.setColorAt(1.00, QColor(255, 255, 255, 0))
+        painter.fillPath(glass_path, QBrush(bottom_glare))
+
+        top_edge = QLinearGradient(glass_rect.left(), glass_rect.top(), glass_rect.right(), glass_rect.top())
+        top_edge.setColorAt(0.00, QColor(255, 255, 255, 225))
+        top_edge.setColorAt(0.24, QColor(255, 255, 255, 150))
+        top_edge.setColorAt(0.78, QColor(180, 245, 255, 82))
+        top_edge.setColorAt(1.00, QColor(70, 185, 190, 150))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QBrush(top_edge), max(1.4, size * 0.007), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(glass_rect, 25 * 16, 152 * 16)
+
+        right_edge = QColor(122, 239, 228, 126)
+        painter.setPen(QPen(right_edge, max(1.2, size * 0.006), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(glass_rect, -42 * 16, 88 * 16)
+
+        painter.setPen(QPen(QColor(255, 255, 255, 34), max(1.0, size * 0.004)))
+        painter.drawEllipse(glass_rect.adjusted(size * 0.035, size * 0.035, -size * 0.035, -size * 0.035))
+
+        glint_width = max(2.0, size * 0.012)
+        painter.setPen(QPen(QColor(255, 255, 255, 216), glint_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(arc.adjusted(-size * 0.010, -size * 0.010, size * 0.010, size * 0.010), 73 * 16, 31 * 16)
+
     def paintEvent(self, e):
         rect = self.rect()
         if rect.width() < 10 or rect.height() < 10:
@@ -672,6 +749,7 @@ class Gauge(QWidget):
         p.setBrush(radial)
         glow_inset = max(24, int(size * 0.13))
         p.drawEllipse(QRectF(square.adjusted(glow_inset, glow_inset, -glow_inset, -glow_inset)))
+        self.draw_liquid_glass_surface(p, QRectF(square), QRectF(arc), size, compact)
 
         track_width = max(7, int(size * (0.045 if compact else 0.050)))
         glow_width = max(10, int(size * (0.066 if compact else 0.074)))
