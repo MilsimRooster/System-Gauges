@@ -67,9 +67,9 @@ Classic:
 
 ![Classic mode](full_classic.png)
 
-Telemetry:
+Compact vertical:
 
-![Telemetry mode](full_telemetry.png)
+![Compact vertical mode](full_telemetry.png)
 
 Hybrid:
 
