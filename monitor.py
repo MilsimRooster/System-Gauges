@@ -661,8 +661,8 @@ class Gauge(QWidget):
         painter.fillPath(glass_path, QBrush(body))
 
         haze = QLinearGradient(glass_rect.left(), glass_rect.top(), glass_rect.right(), glass_rect.bottom())
-        haze.setColorAt(0.00, QColor(255, 255, 255, 78 if compact else 88))
-        haze.setColorAt(0.20, QColor(225, 250, 255, 28))
+        haze.setColorAt(0.00, QColor(255, 255, 255, 48 if compact else 56))
+        haze.setColorAt(0.20, QColor(225, 250, 255, 20))
         haze.setColorAt(0.58, QColor(255, 255, 255, 4))
         haze.setColorAt(1.00, QColor(4, 12, 20, 70))
         painter.fillPath(glass_path, QBrush(haze))
@@ -672,10 +672,24 @@ class Gauge(QWidget):
             glass_rect.top() + glass_rect.height() * 0.13,
             glass_rect.width() * 0.34,
         )
-        glare.setColorAt(0.00, QColor(255, 255, 255, 102 if compact else 122))
-        glare.setColorAt(0.34, QColor(255, 255, 255, 30))
+        glare.setColorAt(0.00, QColor(255, 255, 255, 76 if compact else 62))
+        glare.setColorAt(0.30, QColor(255, 255, 255, 26))
+        glare.setColorAt(0.62, QColor(255, 255, 255, 0))
         glare.setColorAt(1.00, QColor(255, 255, 255, 0))
         painter.fillPath(glass_path, QBrush(glare))
+
+        surface_sheen = QLinearGradient(
+            glass_rect.left() + glass_rect.width() * 0.08,
+            glass_rect.top() + glass_rect.height() * 0.05,
+            glass_rect.left() + glass_rect.width() * 0.68,
+            glass_rect.top() + glass_rect.height() * 0.40,
+        )
+        surface_sheen.setColorAt(0.00, QColor(255, 255, 255, 0))
+        surface_sheen.setColorAt(0.18, QColor(255, 255, 255, 48 if compact else 38))
+        surface_sheen.setColorAt(0.42, QColor(255, 255, 255, 12))
+        surface_sheen.setColorAt(0.78, QColor(255, 255, 255, 0))
+        surface_sheen.setColorAt(1.00, QColor(255, 255, 255, 0))
+        painter.fillPath(glass_path, QBrush(surface_sheen))
 
         bottom_glare = QRadialGradient(
             glass_rect.left() + glass_rect.width() * 0.78,
@@ -688,24 +702,34 @@ class Gauge(QWidget):
         painter.fillPath(glass_path, QBrush(bottom_glare))
 
         top_edge = QLinearGradient(glass_rect.left(), glass_rect.top(), glass_rect.right(), glass_rect.top())
-        top_edge.setColorAt(0.00, QColor(255, 255, 255, 225))
-        top_edge.setColorAt(0.24, QColor(255, 255, 255, 150))
-        top_edge.setColorAt(0.78, QColor(180, 245, 255, 82))
-        top_edge.setColorAt(1.00, QColor(70, 185, 190, 150))
+        top_edge.setColorAt(0.00, QColor(255, 255, 255, 112))
+        top_edge.setColorAt(0.18, QColor(255, 255, 255, 62))
+        top_edge.setColorAt(0.56, QColor(180, 245, 255, 32))
+        top_edge.setColorAt(1.00, QColor(70, 185, 190, 84))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QBrush(top_edge), max(1.4, size * 0.007), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawArc(glass_rect, 25 * 16, 152 * 16)
 
-        right_edge = QColor(122, 239, 228, 126)
-        painter.setPen(QPen(right_edge, max(1.2, size * 0.006), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        right_edge = QLinearGradient(glass_rect.right(), glass_rect.top(), glass_rect.right(), glass_rect.bottom())
+        right_edge.setColorAt(0.00, QColor(255, 255, 255, 0))
+        right_edge.setColorAt(0.34, QColor(122, 239, 228, 64 if compact else 48))
+        right_edge.setColorAt(0.68, QColor(122, 239, 228, 18))
+        right_edge.setColorAt(1.00, QColor(255, 255, 255, 0))
+        painter.setPen(QPen(QBrush(right_edge), max(1.2, size * 0.006), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawArc(glass_rect, -42 * 16, 88 * 16)
 
         painter.setPen(QPen(QColor(255, 255, 255, 34), max(1.0, size * 0.004)))
         painter.drawEllipse(glass_rect.adjusted(size * 0.035, size * 0.035, -size * 0.035, -size * 0.035))
 
-        glint_width = max(2.0, size * 0.012)
-        painter.setPen(QPen(QColor(255, 255, 255, 216), glint_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawArc(arc.adjusted(-size * 0.010, -size * 0.010, size * 0.010, size * 0.010), 73 * 16, 31 * 16)
+        top_glare_path = QPainterPath()
+        top_glare_path.addEllipse(glass_rect)
+        top_glare = QLinearGradient(glass_rect.left(), glass_rect.top(), glass_rect.right(), glass_rect.bottom())
+        top_glare.setColorAt(0.00, QColor(255, 255, 255, 0))
+        top_glare.setColorAt(0.18, QColor(255, 255, 255, 84 if compact else 66))
+        top_glare.setColorAt(0.42, QColor(255, 255, 255, 18))
+        top_glare.setColorAt(0.82, QColor(255, 255, 255, 0))
+        top_glare.setColorAt(1.00, QColor(255, 255, 255, 0))
+        painter.fillPath(top_glare_path, QBrush(top_glare))
 
     def paintEvent(self, e):
         rect = self.rect()
