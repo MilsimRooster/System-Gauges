@@ -2,5 +2,4 @@ PyQt6
 psutil
 WMI
 pywin32
-nvidia-ml-py
 openrgb-python

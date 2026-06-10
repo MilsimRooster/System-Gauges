@@ -7,6 +7,10 @@ import warnings
 import json
 import os
 import traceback
+import csv
+import shutil
+import ctypes
+import struct
 from pathlib import Path
 import psutil
 import wmi
@@ -16,7 +20,10 @@ warnings.filterwarnings(
     message=r"The pynvml package is deprecated.*",
     category=FutureWarning,
 )
-import pynvml
+try:
+    import pynvml
+except ImportError:
+    pynvml = None
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
 from PyQt6.QtGui import (
@@ -39,21 +46,25 @@ from PyQt6.QtWidgets import (
     QWidget,
     QGridLayout,
     QHBoxLayout,
-    QProgressBar,
     QScrollArea,
     QVBoxLayout,
     QSystemTrayIcon,
     QMenu,
     QStyle,
-    QLabel,
     QPushButton,
     QSizePolicy,
     QFileDialog
 )
 REFRESH_MS = 150
 SMART_REFRESH_SECONDS = 4
-PROCESS_HOG_REFRESH_SECONDS = 5
-TOP_HOGS_ENABLED_DEFAULT = True
+FRAME_RATE_TARGET_FPS = 60
+FRAME_RATE_UPDATE_SECONDS = 0.75
+PRESENTMON_REFRESH_SECONDS = 5
+PRESENTMON_SAMPLE_SECONDS = 1.25
+PRESENTMON_EXE_NAMES = ("PresentMon.exe", "PresentMon-2.3.1-x64.exe")
+RTSS_SHARED_MEMORY_NAME = "RTSSSharedMemoryV2"
+RTSS_SIGNATURE = struct.unpack("<I", b"SSTR")[0]
+NETWORK_TARGET_MBPS = 100
 SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
 UNKNOWN_SMART = ("?", "N/A")
 SMART_DEBUG = False
@@ -223,6 +234,8 @@ def decode_nvml_name(name):
 
 
 def select_nvml_gpu_handle():
+    if pynvml is None:
+        raise RuntimeError("NVML support is not installed")
     pynvml.nvmlInit()
     count = pynvml.nvmlDeviceGetCount()
     preferred_terms = ("rtx", "gtx", "nvidia", "geforce", "quadro")
@@ -242,6 +255,79 @@ def select_nvml_gpu_handle():
     return first_handle, first_name
 
 
+def select_display_gpu_adapter(adapters):
+    adapter_list = list(adapters or [])
+    if not adapter_list:
+        return None
+
+    ignored_terms = ("basic render", "remote", "mirror", "virtual display")
+    hardware = [
+        adapter for adapter in adapter_list
+        if not any(term in str(getattr(adapter, "Name", "")).lower() for term in ignored_terms)
+    ]
+    candidates = hardware or adapter_list
+    preferred_terms = ("nvidia", "geforce", "rtx", "gtx", "radeon", "amd", "intel", "iris", "arc", "uhd")
+    for adapter in candidates:
+        name = str(getattr(adapter, "Name", "") or "")
+        if any(term in name.lower() for term in preferred_terms):
+            return adapter
+    return candidates[0]
+
+
+def calculate_wmi_gpu_percent(engine_rows):
+    values = []
+    three_d_values = []
+    for row in engine_rows or []:
+        try:
+            value = int(float(getattr(row, "UtilizationPercentage", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        value = max(0, min(100, value))
+        values.append(value)
+        if "engtype_3d" in str(getattr(row, "Name", "")).lower():
+            three_d_values.append(value)
+    return max(three_d_values or values or [0])
+
+
+def format_adapter_ram(adapter):
+    try:
+        ram = int(getattr(adapter, "AdapterRAM", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if ram <= 0:
+        return ""
+    return f"VRAM {ram / (1024 ** 3):.1f} GB"
+
+
+class GenericGpuReader:
+    def __init__(self, wmi_factory=None):
+        self.wmi_factory = wmi_factory or wmi.WMI
+        self.adapter = None
+
+    def read(self):
+        client = self.wmi_factory()
+        if self.adapter is None:
+            try:
+                self.adapter = select_display_gpu_adapter(client.Win32_VideoController())
+            except Exception as e:
+                log_event(f"Generic GPU adapter lookup failed: {e}", e)
+        try:
+            percent = calculate_wmi_gpu_percent(
+                client.Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine()
+            )
+        except Exception as e:
+            log_event(f"Generic GPU utilization lookup failed: {e}", e)
+            percent = 0
+        name = str(getattr(self.adapter, "Name", "") or "GPU") if self.adapter else "GPU"
+        return {
+            "percent": percent,
+            "name": name,
+            "temp_text": "Temp N/A",
+            "memory_text": format_adapter_ram(self.adapter),
+            "power_text": "Generic GPU",
+        }
+
+
 def format_temp(c):
     f = c_to_f(c)
     return f"Temp {f}°F" if f != "?" else "Temp N/A"
@@ -256,6 +342,24 @@ def format_speed(v):
     if kb >= 1:
         return f"{kb:.0f} KB/s"
     return "0 B/s"
+
+
+def format_network_speed(bytes_per_second):
+    bits_per_second = max(0, float(bytes_per_second)) * 8
+    if bits_per_second >= 1_000_000_000:
+        return f"{bits_per_second / 1_000_000_000:.1f} Gbps"
+    if bits_per_second >= 1_000_000:
+        return f"{bits_per_second / 1_000_000:.1f} Mbps"
+    if bits_per_second >= 1_000:
+        return f"{bits_per_second / 1_000:.1f} Kbps"
+    return f"{bits_per_second:.0f} bps"
+
+
+def network_rate_percent(bytes_per_second, target_mbps=NETWORK_TARGET_MBPS):
+    if target_mbps <= 0:
+        return 0
+    target_bytes_per_second = (target_mbps * 1_000_000) / 8
+    return int(max(0, min((bytes_per_second / target_bytes_per_second) * 100, 100)))
 
 
 def format_bytes(value):
@@ -279,36 +383,281 @@ def format_disk_rate(bytes_per_sec):
     return f"{format_bytes(bytes_per_sec)}/s"
 
 
-def is_ignored_process_hog(process):
-    pid = process.get("pid")
-    name = (process.get("name") or "").strip().lower()
-    return pid == 0 or name == "system idle process"
+def frame_rate_percent(fps, target_fps=FRAME_RATE_TARGET_FPS):
+    if target_fps <= 0:
+        return 0
+    return int(max(0, min((fps / target_fps) * 100, 100)))
 
 
-def calculate_hog_score(process):
-    memory = max(0.0, float(process.get("memory_percent") or 0.0))
-    return memory
+def gauge_color_rgb(value, high_is_good=False):
+    if high_is_good:
+        if value >= 60:
+            return (0, 200, 120)
+        if value >= 35:
+            return (255, 180, 0)
+        return (255, 70, 70)
+
+    if value < 60:
+        return (0, 200, 120)
+    if value < 85:
+        return (255, 180, 0)
+    return (255, 70, 70)
 
 
-def rank_process_hogs(processes, limit=3):
-    ranked = []
-    for process in processes:
-        if is_ignored_process_hog(process):
+def gauge_history_color_rgb(value, high_is_good=False):
+    if high_is_good:
+        if value >= 50:
+            return (0, 255, 120)
+        if value >= 20:
+            return (255, 200, 0)
+        return (255, 60, 0)
+
+    if value < 50:
+        return (0, 255, 120)
+    if value < 80:
+        return (255, 200, 0)
+    return (255, 60, 0)
+
+
+def _row_value(row, column_name):
+    wanted = column_name.lower()
+    for key, value in row.items():
+        if key and key.strip().lstrip("\ufeff").lower() == wanted:
+            return value
+    return None
+
+
+def parse_presentmon_fps(csv_text):
+    groups = {}
+    ignored_apps = {"systemgauges.exe", "codex.exe", "presentmon.exe", "presentmon-2.4.1-x64.exe"}
+    reader = csv.DictReader(csv_text.splitlines())
+    for row in reader:
+        app = (_row_value(row, "Application") or "").strip()
+        if not app or app.lower() in ignored_apps:
             continue
-        process = dict(process)
-        score = calculate_hog_score(process)
-        if score <= 0:
+
+        ms_text = _row_value(row, "MsBetweenPresents")
+        try:
+            ms = float(ms_text)
+        except (TypeError, ValueError):
             continue
-        item = dict(process)
-        item["hog_score"] = score
-        ranked.append(item)
+        if ms <= 0:
+            continue
 
-    ranked.sort(key=lambda item: item["hog_score"], reverse=True)
-    return ranked[:limit]
+        groups.setdefault(app, []).append(1000.0 / ms)
+
+    if not groups:
+        return None
+
+    app, values = max(groups.items(), key=lambda item: len(item[1]))
+    return {
+        "application": app,
+        "fps": sum(values) / len(values),
+        "frames": len(values),
+    }
 
 
-def top_hogs_button_text(enabled):
-    return "Hide Top Hogs" if enabled else "Show Top Hogs"
+def _decode_c_string(value):
+    raw = value.split(b"\0", 1)[0]
+    return raw.decode("mbcs", errors="ignore").strip()
+
+
+def _rtss_entry_reading(data, offset):
+    if len(data) < offset + 284:
+        return None
+
+    process_id = struct.unpack_from("<I", data, offset)[0]
+    name = _decode_c_string(data[offset + 4:offset + 264])
+    if not process_id or not name:
+        return None
+
+    ignored_apps = {
+        "systemgauges.exe",
+        "codex.exe",
+        "presentmon.exe",
+        "presentmon-2.4.1-x64.exe",
+        "rtss.exe",
+        "rtsshooksloader.exe",
+        "rtsshooksloader64.exe",
+    }
+    if name.lower() in ignored_apps:
+        return None
+
+    time0, time1, frames, frame_time = struct.unpack_from("<IIII", data, offset + 268)
+    fps = None
+    if time0 and time1 > time0 and frames:
+        fps = 1000.0 * frames / (time1 - time0)
+    elif frame_time:
+        fps = 1000000.0 / frame_time
+
+    if fps is None or fps <= 0 or not math.isfinite(fps):
+        return None
+
+    return {
+        "application": name,
+        "fps": fps,
+        "frames": frames,
+        "time1": time1,
+        "source": "RTSS",
+    }
+
+
+def parse_rtss_fps_snapshot(data):
+    if not data or len(data) < 20:
+        return None
+
+    signature, version, entry_size, app_offset, app_count = struct.unpack_from("<IIIII", data, 0)
+    if signature != RTSS_SIGNATURE or (version >> 16) != 2:
+        return None
+    if entry_size <= 0 or app_offset <= 0 or app_count <= 0:
+        return None
+
+    readings = []
+    max_count = min(app_count, 512)
+    for index in range(max_count):
+        offset = app_offset + (index * entry_size)
+        if offset + min(entry_size, 284) > len(data):
+            break
+        reading = _rtss_entry_reading(data, offset)
+        if reading:
+            reading["index"] = index
+            readings.append(reading)
+
+    if not readings:
+        return None
+
+    foreground_index = None
+    if len(data) >= 68:
+        foreground_index = struct.unpack_from("<I", data, 64)[0]
+        for reading in readings:
+            if reading["index"] == foreground_index:
+                return reading
+
+    return max(readings, key=lambda item: item.get("time1", 0))
+
+
+def read_rtss_shared_memory_snapshot():
+    if os.name != "nt":
+        return None
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenFileMappingW.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
+    kernel32.OpenFileMappingW.restype = ctypes.c_void_p
+    kernel32.MapViewOfFile.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_size_t]
+    kernel32.MapViewOfFile.restype = ctypes.c_void_p
+    kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    file_map_read = 0x0004
+    handle = kernel32.OpenFileMappingW(file_map_read, False, RTSS_SHARED_MEMORY_NAME)
+    if not handle:
+        return None
+
+    view = None
+    try:
+        view = kernel32.MapViewOfFile(handle, file_map_read, 0, 0, 0)
+        if not view:
+            return None
+
+        header = ctypes.string_at(view, 68)
+        signature, version, entry_size, app_offset, app_count = struct.unpack_from("<IIIII", header, 0)
+        if signature != RTSS_SIGNATURE or (version >> 16) != 2:
+            return None
+
+        needed = app_offset + (min(app_count, 512) * entry_size)
+        if needed <= 0 or needed > 8 * 1024 * 1024:
+            return None
+        return ctypes.string_at(view, needed)
+    except Exception as e:
+        log_event(f"RTSS shared memory read failed: {e}", e)
+        return None
+    finally:
+        if view:
+            kernel32.UnmapViewOfFile(view)
+        kernel32.CloseHandle(handle)
+
+
+def read_rtss_fps():
+    return parse_rtss_fps_snapshot(read_rtss_shared_memory_snapshot())
+
+
+def presentmon_failure_message(output):
+    text = (output or "").lower()
+    if "access denied" in text:
+        return "Needs admin or PerfLog"
+    if "etw events were lost" in text:
+        return "Run elevated"
+    if "failed to start trace session" in text:
+        return "PresentMon trace failed"
+    return "No game frames"
+
+
+def find_presentmon_executable():
+    for exe_name in PRESENTMON_EXE_NAMES:
+        found = shutil.which(exe_name)
+        if found:
+            return found
+
+    app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    search_roots = [
+        app_dir,
+        app_dir / "tools",
+        app_dir / "PresentMon",
+        Path(r"C:\Program Files\Intel\PresentMon\PresentMonConsoleApplication"),
+        Path(r"C:\Program Files\Intel\PresentMon\PresentMonApplication"),
+    ]
+    for root in search_roots:
+        for exe_name in PRESENTMON_EXE_NAMES:
+            candidate = root / exe_name
+            if candidate.exists():
+                return str(candidate)
+        matches = sorted(root.glob("PresentMon*.exe"))
+        if matches:
+            return str(matches[0])
+    return None
+
+
+def find_rtss_executable():
+    found = shutil.which("RTSS.exe")
+    if found:
+        return found
+
+    search_roots = [
+        Path(r"C:\Program Files (x86)\RivaTuner Statistics Server"),
+        Path(r"C:\Program Files\RivaTuner Statistics Server"),
+    ]
+    for root in search_roots:
+        candidate = root / "RTSS.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def is_rtss_running():
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info.get("name") or "").lower() == "rtss.exe":
+                return True
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return False
+
+
+def start_rtss_if_available(rtss_path):
+    if not rtss_path or is_rtss_running():
+        return bool(rtss_path)
+    try:
+        subprocess.Popen(
+            [rtss_path],
+            cwd=str(Path(rtss_path).resolve().parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        log_event(f"Started RTSS: {rtss_path}")
+        return True
+    except Exception as e:
+        log_event(f"RTSS start failed: {e}", e)
+        return False
 
 
 # ====================== SMART ======================
@@ -478,6 +827,53 @@ class SmartWorker(QThread):
         self.result_ready.emit(results)
 
 
+class PresentMonWorker(QThread):
+    result_ready = pyqtSignal(object)
+
+    def __init__(self, presentmon_path):
+        super().__init__()
+        self.presentmon_path = presentmon_path
+
+    def run(self):
+        output_dir = config_path().parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"presentmon-{os.getpid()}-{int(time.time() * 1000)}.csv"
+        try:
+            cmd = [
+                self.presentmon_path,
+                "--output_file",
+                str(output_file),
+                "--session_name",
+                "SystemGaugesFPS",
+                "--set_circular_buffer_size",
+                "65536",
+                "--timed",
+                str(PRESENTMON_SAMPLE_SECONDS),
+                "--terminate_after_timed",
+            ]
+            result = subprocess.run(
+                cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=PRESENTMON_SAMPLE_SECONDS + 4,
+            )
+            output = (result.stdout or "") + (result.stderr or "")
+            reading = None
+            if output_file.exists():
+                reading = parse_presentmon_fps(output_file.read_text(encoding="utf-8", errors="ignore"))
+            self.result_ready.emit(reading or {"error": presentmon_failure_message(output)})
+        except Exception as e:
+            log_event(f"PresentMon sample failed: {e}", e)
+            self.result_ready.emit({"error": "PresentMon error"})
+        finally:
+            try:
+                output_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 # RGB, Gauge, Monitor classes (full)
 class RGBController:
     def __init__(self):
@@ -511,11 +907,12 @@ class RGBController:
 
 
 class Gauge(QWidget):
-    def __init__(self, title, preferred_size=230, minimum_size=70):
+    def __init__(self, title, preferred_size=230, minimum_size=70, high_is_good=False):
         super().__init__()
         self.title = title
         self.preferred_size = preferred_size
         self.minimum_size = minimum_size
+        self.high_is_good = high_is_good
         self.target = 0
         self.value = 0
         self.main = ""
@@ -564,12 +961,7 @@ class Gauge(QWidget):
         self.update()
 
     def color(self):
-        v = self.value
-        if v < 60:
-            return QColor(0, 200, 120)
-        elif v < 85:
-            return QColor(255, 180, 0)
-        return QColor(255, 70, 70)
+        return QColor(*gauge_color_rgb(self.value, self.high_is_good))
 
     def draw_waveform(self, painter: QPainter, rect: QRectF, alpha=140, glow=True):
         if len(self.history) == 0:
@@ -594,7 +986,7 @@ class Gauge(QWidget):
             bar_w_int = int(bar_width)
             bar_h_int = int(bar_h)
 
-            color = QColor(0, 255, 120) if val < 50 else QColor(255, 200, 0) if val < 80 else QColor(255, 60, 0)
+            color = QColor(*gauge_history_color_rgb(val, self.high_is_good))
             if self.uses_image_background():
                 color.setAlpha(220)
 
@@ -639,7 +1031,7 @@ class Gauge(QWidget):
                 center.x() + (base_radius + bar_len) * math.cos(angle),
                 center.y() - (base_radius + bar_len) * math.sin(angle)
             )
-            color = QColor(0, 255, 120) if val < 50 else QColor(255, 200, 0) if val < 80 else QColor(255, 60, 0)
+            color = QColor(*gauge_history_color_rgb(val, self.high_is_good))
             color.setAlpha(145 if self.uses_image_background() else 175)
             painter.setPen(QPen(color, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawLine(inner, outer)
@@ -865,73 +1257,6 @@ class Gauge(QWidget):
             self.draw_arc_waveform(p, arc, size)
 
 
-class ProcessHogRow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setMinimumHeight(42)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        layout = QGridLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(2)
-
-        self.name_label = QLabel("Idle")
-        self.name_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #f3fbff; background: transparent;")
-        self.score_label = QLabel("Score 0")
-        self.score_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.score_label.setStyleSheet("font-size: 11px; color: #a9d8ff; background: transparent;")
-        self.detail_label = QLabel("Waiting for process activity")
-        self.detail_label.setStyleSheet("font-size: 10px; color: #9aa8b5; background: transparent;")
-
-        bar_layout = QHBoxLayout()
-        bar_layout.setContentsMargins(0, 0, 0, 0)
-        bar_layout.setSpacing(5)
-        self.ram_bar = self._make_bar("#f0b429")
-        bar_layout.addWidget(self.ram_bar)
-
-        layout.addWidget(self.name_label, 0, 0)
-        layout.addWidget(self.score_label, 0, 1)
-        layout.addWidget(self.detail_label, 1, 0)
-        layout.addLayout(bar_layout, 1, 1)
-        layout.setColumnStretch(0, 3)
-        layout.setColumnStretch(1, 2)
-
-    def _make_bar(self, color):
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        bar.setTextVisible(False)
-        bar.setFixedHeight(7)
-        bar.setStyleSheet(f"""
-            QProgressBar {{
-                background: rgba(37, 43, 49, 180);
-                border: 0;
-                border-radius: 2px;
-            }}
-            QProgressBar::chunk {{
-                background: {color};
-                border-radius: 2px;
-            }}
-        """)
-        return bar
-
-    def set_idle(self):
-        self.name_label.setText("Idle")
-        self.score_label.setText("RAM 0.0%")
-        self.detail_label.setText("Waiting for process activity")
-        self.ram_bar.setValue(0)
-
-    def set_process(self, process):
-        name = process.get("name") or "Unknown"
-        pid = process.get("pid", "?")
-        memory = float(process.get("memory_percent") or 0.0)
-
-        self.name_label.setText(f"{name}  ({pid})")
-        self.score_label.setText(f"RAM {memory:.1f}%")
-        self.detail_label.setText("Memory share")
-        self.ram_bar.setValue(int(max(0, min(memory * 3, 100))))
-
-
 class Monitor(QWidget):
     def __init__(self):
         super().__init__()
@@ -961,6 +1286,7 @@ class Monitor(QWidget):
             self.setWindowIcon(self.app_icon)
         self.gpu_handle = None
         self.gpu_name = ""
+        self.generic_gpu = GenericGpuReader()
         self.last_gpu_init_attempt = 0
         self.gpu_init_retry_seconds = 10
         try:
@@ -972,10 +1298,18 @@ class Monitor(QWidget):
 
         self.gpu_samples = []
         self.gpu_window_seconds = 1.6
-        self.process_hogs_enabled = TOP_HOGS_ENABLED_DEFAULT
-        self.last_process_refresh = 0
+        self.frame_tick_count = 0
+        self.frame_rate_last_time = time.time()
+        self.rtss_path = find_rtss_executable()
+        self.rtss_start_failed = bool(self.rtss_path) and not start_rtss_if_available(self.rtss_path)
+        self.presentmon_path = find_presentmon_executable()
+        self.presentmon_worker = None
+        self.presentmon_workers = []
+        self.last_presentmon_refresh = 0
+        self.game_fps_reading = None
 
         self.last = psutil.disk_io_counters(perdisk=True)
+        self.last_net = psutil.net_io_counters()
         self.last_time = time.time()
 
         disk_counters = psutil.disk_io_counters(perdisk=True)
@@ -1038,32 +1372,46 @@ class Monitor(QWidget):
         container.setAutoFillBackground(False)
         container_layout = QVBoxLayout(container)
         top_grid = QGridLayout()
+        top_grid_wrapper = QHBoxLayout()
         drive_grid = QGridLayout()
+        drive_grid_wrapper = QHBoxLayout()
 
-        container_layout.setContentsMargins(8, 8, 8, 8)
-        container_layout.setSpacing(6)
+        container_layout.setContentsMargins(8, 4, 8, 6)
+        container_layout.setSpacing(2)
+        top_grid_wrapper.setContentsMargins(0, 0, 0, 0)
+        top_grid_wrapper.setSpacing(0)
+        top_grid.setContentsMargins(0, 0, 0, 0)
         top_grid.setHorizontalSpacing(10)
-        top_grid.setVerticalSpacing(6)
-        top_grid.setColumnStretch(0, 1)
-        top_grid.setColumnStretch(1, 1)
-        top_grid.setColumnStretch(2, 1)
+        top_grid.setVerticalSpacing(0)
+        for col in range(6):
+            top_grid.setColumnStretch(col, 1)
+        drive_grid_wrapper.setContentsMargins(0, 0, 0, 0)
+        drive_grid_wrapper.setSpacing(0)
+        drive_grid.setContentsMargins(0, 0, 0, 0)
         drive_grid.setHorizontalSpacing(8)
-        drive_grid.setVerticalSpacing(4)
+        drive_grid.setVerticalSpacing(0)
 
-        self.gpu = Gauge("GPU", preferred_size=250, minimum_size=80)
-        self.ram = Gauge("RAM", preferred_size=250, minimum_size=80)
-        self.cpu = Gauge("CPU", preferred_size=250, minimum_size=80)
+        self.gpu = Gauge("GPU", preferred_size=226, minimum_size=80)
+        self.ram = Gauge("RAM", preferred_size=226, minimum_size=80)
+        self.cpu = Gauge("CPU", preferred_size=226, minimum_size=80)
+        self.frame_rate = Gauge("FPS", preferred_size=226, minimum_size=80, high_is_good=True)
+        self.network = Gauge("NET", preferred_size=226, minimum_size=80)
 
-        top_grid.addWidget(self.gpu, 0, 0)
-        top_grid.addWidget(self.cpu, 0, 1)
-        top_grid.addWidget(self.ram, 0, 2)
+        top_grid.addWidget(self.gpu, 0, 0, 1, 2)
+        top_grid.addWidget(self.cpu, 0, 2, 1, 2)
+        top_grid.addWidget(self.ram, 0, 4, 1, 2)
+        top_grid.addWidget(self.frame_rate, 1, 1, 1, 2)
+        top_grid.addWidget(self.network, 1, 3, 1, 2)
 
-        container_layout.addLayout(top_grid, 3)
+        top_grid_wrapper.addStretch(1)
+        top_grid_wrapper.addLayout(top_grid)
+        top_grid_wrapper.addStretch(1)
+        container_layout.addLayout(top_grid_wrapper)
 
         self.disk_gauges = {}
 
         for i, d in enumerate(self.disks):
-            g = Gauge(self.labels[i], preferred_size=178, minimum_size=64)
+            g = Gauge(self.labels[i], preferred_size=148, minimum_size=60)
             g.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.disk_gauges[d] = g
             row = i // 4
@@ -1073,56 +1421,10 @@ class Monitor(QWidget):
         for col in range(4):
             drive_grid.setColumnStretch(col, 1)
 
-        container_layout.addLayout(drive_grid, 1)
-
-        self.hog_header = QWidget()
-        self.hog_header.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.hog_header.setAutoFillBackground(False)
-        hog_header_layout = QHBoxLayout(self.hog_header)
-        hog_header_layout.setContentsMargins(2, 2, 2, 0)
-        hog_header_layout.setSpacing(8)
-
-        self.hog_title = QLabel("Top Hogs")
-        self.hog_title.setStyleSheet("""
-            color: #a9d8ff;
-            font-size: 12px;
-            font-weight: 600;
-            background: transparent;
-            padding: 0;
-        """)
-        self.hog_toggle_button = QPushButton(top_hogs_button_text(self.process_hogs_enabled))
-        self.hog_toggle_button.setCheckable(True)
-        self.hog_toggle_button.setChecked(self.process_hogs_enabled)
-        self.hog_toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.hog_toggle_button.setStyleSheet("""
-            QPushButton {
-                color: #dff4ff;
-                background: rgba(17, 26, 42, 190);
-                border: 1px solid rgba(169, 216, 255, 130);
-                border-radius: 3px;
-                padding: 3px 8px;
-                font-size: 10px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: rgba(23, 42, 62, 220);
-            }
-            QPushButton:checked {
-                color: #07130f;
-                background: #00c878;
-                border-color: #00e08a;
-            }
-        """)
-        self.hog_toggle_button.toggled.connect(self.set_process_hogs_enabled)
-        hog_header_layout.addWidget(self.hog_title)
-        hog_header_layout.addStretch(1)
-        hog_header_layout.addWidget(self.hog_toggle_button)
-        container_layout.addWidget(self.hog_header)
-
-        self.process_rows = [ProcessHogRow() for _ in range(3)]
-        for row in self.process_rows:
-            container_layout.addWidget(row)
-        self.set_process_hogs_visible(self.process_hogs_enabled)
+        drive_grid_wrapper.addStretch(1)
+        drive_grid_wrapper.addLayout(drive_grid)
+        drive_grid_wrapper.addStretch(1)
+        container_layout.addLayout(drive_grid_wrapper)
 
         self.main_scroll.setWidget(container)
         layout.addWidget(self.main_scroll)
@@ -1147,18 +1449,13 @@ class Monitor(QWidget):
         show = QAction("Show", self)
         hide = QAction("Hide", self)
         exit = QAction("Exit", self)
-        self.top_hogs_action = QAction(top_hogs_button_text(self.process_hogs_enabled), self)
-        self.top_hogs_action.setCheckable(True)
-        self.top_hogs_action.setChecked(self.process_hogs_enabled)
 
         show.triggered.connect(self.show)
         hide.triggered.connect(self.hide)
         exit.triggered.connect(self.exit_app)
-        self.top_hogs_action.triggered.connect(self.set_process_hogs_enabled)
 
         menu.addAction(show)
         menu.addAction(hide)
-        menu.addAction(self.top_hogs_action)
         menu.addSeparator()
 
         menu.addMenu(self.create_background_menu("Background Skin"))
@@ -1222,6 +1519,8 @@ class Monitor(QWidget):
             self.gpu.background_is_image = is_image
             self.ram.background_is_image = is_image
             self.cpu.background_is_image = is_image
+            self.frame_rate.background_is_image = is_image
+            self.network.background_is_image = is_image
             for gauge in self.disk_gauges.values():
                 gauge.background_is_image = is_image
         if hasattr(self, "skin_actions"):
@@ -1341,6 +1640,7 @@ class Monitor(QWidget):
         self.timer.stop()
         self.anim.stop()
         self.stop_smart_workers()
+        self.stop_presentmon_workers()
         QApplication.quit()
 
     def handle_tray_activated(self, reason):
@@ -1353,6 +1653,8 @@ class Monitor(QWidget):
         self.gpu.display_mode = self.display_mode
         self.ram.display_mode = self.display_mode
         self.cpu.display_mode = self.display_mode
+        self.frame_rate.display_mode = self.display_mode
+        self.network.display_mode = self.display_mode
         for g in self.disk_gauges.values():
             g.display_mode = self.display_mode
 
@@ -1410,56 +1712,37 @@ class Monitor(QWidget):
             worker.deleteLater()
         self.smart_worker = None
 
-    def set_process_hogs_visible(self, visible):
-        for row in self.process_rows:
-            row.setVisible(visible)
-        self.update_top_hogs_controls()
+    def refresh_presentmon_fps(self):
+        if not self.presentmon_path:
+            return
+        if any(worker.isRunning() for worker in self.presentmon_workers):
+            return
 
-    def update_top_hogs_controls(self):
-        if hasattr(self, "hog_toggle_button"):
-            self.hog_toggle_button.blockSignals(True)
-            self.hog_toggle_button.setChecked(self.process_hogs_enabled)
-            self.hog_toggle_button.setText(top_hogs_button_text(self.process_hogs_enabled))
-            self.hog_toggle_button.blockSignals(False)
-        if hasattr(self, "top_hogs_action"):
-            self.top_hogs_action.blockSignals(True)
-            self.top_hogs_action.setChecked(self.process_hogs_enabled)
-            self.top_hogs_action.setText(top_hogs_button_text(self.process_hogs_enabled))
-            self.top_hogs_action.blockSignals(False)
+        worker = PresentMonWorker(self.presentmon_path)
+        self.presentmon_worker = worker
+        self.presentmon_workers.append(worker)
+        worker.result_ready.connect(self._presentmon_finished)
+        worker.finished.connect(lambda worker=worker: self._presentmon_worker_finished(worker))
+        worker.start()
 
-    def set_process_hogs_enabled(self, enabled):
-        self.process_hogs_enabled = bool(enabled)
-        self.set_process_hogs_visible(self.process_hogs_enabled)
-        if self.process_hogs_enabled:
-            self.last_process_refresh = 0
-            self.refresh_process_hogs()
-        else:
-            for row in self.process_rows:
-                row.set_idle()
+    def _presentmon_finished(self, result):
+        self.game_fps_reading = result
 
-    def refresh_process_hogs(self):
-        processes = []
+    def _presentmon_worker_finished(self, worker):
+        if self.presentmon_worker is worker:
+            self.presentmon_worker = None
+        if worker in self.presentmon_workers:
+            self.presentmon_workers.remove(worker)
+        worker.deleteLater()
 
-        for proc in psutil.process_iter(["pid", "name"]):
-            try:
-                pid = proc.info.get("pid")
-                name = proc.info.get("name") or proc.name() or "Unknown"
-                memory = proc.memory_percent()
-
-                processes.append({
-                    "pid": pid,
-                    "name": name,
-                    "memory_percent": memory,
-                })
-            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-                continue
-
-        ranked = rank_process_hogs(processes, limit=3)
-        for index, row in enumerate(self.process_rows):
-            if index < len(ranked):
-                row.set_process(ranked[index])
-            else:
-                row.set_idle()
+    def stop_presentmon_workers(self):
+        for worker in list(self.presentmon_workers):
+            if worker.isRunning():
+                worker.wait(4000)
+            if worker in self.presentmon_workers:
+                self.presentmon_workers.remove(worker)
+            worker.deleteLater()
+        self.presentmon_worker = None
 
     def safe_animate(self):
         try:
@@ -1471,8 +1754,110 @@ class Monitor(QWidget):
         self.gpu.tick()
         self.ram.tick()
         self.cpu.tick()
+        self.frame_rate.tick()
+        self.network.tick()
         for g in self.disk_gauges.values():
             g.tick()
+        self.update_frame_rate()
+
+    def update_frame_rate(self, now=None):
+        now = now or time.time()
+        self.frame_tick_count += 1
+
+        rtss_reading = read_rtss_fps() if getattr(self, "rtss_path", None) else None
+        if rtss_reading:
+            self.game_fps_reading = rtss_reading
+
+        if self.presentmon_path and now - self.last_presentmon_refresh >= PRESENTMON_REFRESH_SECONDS:
+            self.refresh_presentmon_fps()
+            self.last_presentmon_refresh = now
+
+        elapsed = now - self.frame_rate_last_time
+        if elapsed < FRAME_RATE_UPDATE_SECONDS:
+            return
+
+        fps = self.frame_tick_count / elapsed
+        self.frame_tick_count = 0
+        self.frame_rate_last_time = now
+
+        if rtss_reading:
+            game_fps = rtss_reading["fps"]
+            self.frame_rate.set_data(
+                frame_rate_percent(game_fps, target_fps=120),
+                f"{game_fps:.0f} FPS",
+                rtss_reading["application"],
+                "Game FPS",
+                "RTSS"
+            )
+            return
+
+        if self.rtss_path and self.game_fps_reading and self.game_fps_reading.get("source") == "RTSS":
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                "Waiting for game",
+                "RTSS",
+                ""
+            )
+            return
+
+        if self.rtss_path and self.rtss_start_failed:
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                "Start RTSS",
+                "Run as admin",
+                ""
+            )
+            return
+
+        if self.game_fps_reading and self.game_fps_reading.get("error"):
+            if self.rtss_path:
+                self.frame_rate.set_data(
+                    0,
+                    "-- FPS",
+                    "Waiting for game",
+                    "RTSS",
+                    ""
+                )
+                return
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                self.game_fps_reading["error"],
+                "PresentMon",
+                ""
+            )
+            return
+
+        if self.game_fps_reading:
+            game_fps = self.game_fps_reading["fps"]
+            self.frame_rate.set_data(
+                frame_rate_percent(game_fps, target_fps=120),
+                f"{game_fps:.0f} FPS",
+                self.game_fps_reading["application"],
+                "Game FPS",
+                ""
+            )
+            return
+
+        if self.presentmon_path:
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                "Waiting for game",
+                "PresentMon",
+                ""
+            )
+            return
+
+        self.frame_rate.set_data(
+            frame_rate_percent(fps),
+            f"{fps:.0f} FPS",
+            "UI render",
+            "",
+            ""
+        )
 
     def safe_update_stats(self):
         try:
@@ -1510,7 +1895,15 @@ class Monitor(QWidget):
                 self.gpu.set_data(gpu_display, f"{gpu_display:.0f}%", f"{c_to_f(temp)}°F",
                                   f"VRAM {vram_used_gb:.1f}/{vram_total_gb:.1f} GB", power_text)
             else:
-                self.gpu.set_data(0, "0%", "N/A", "", "")
+                reading = self.generic_gpu.read()
+                gpu_display = int(reading["percent"])
+                self.gpu.set_data(
+                    gpu_display,
+                    f"{gpu_display:.0f}%",
+                    reading["temp_text"],
+                    reading["memory_text"],
+                    reading["name"],
+                )
         except Exception as e:
             log_event(f"GPU update failed: {e}", e)
             self.gpu.set_data(0, "GPU Error", "", "", "")
@@ -1537,12 +1930,29 @@ class Monitor(QWidget):
         except:
             pass
 
-        # Disks
+        # Network and disks
         try:
             now = time.time()
-            dt = now - self.last_time
+            dt = max(now - self.last_time, 0.001)
             self.last_time = now
             cur = psutil.disk_io_counters(perdisk=True)
+            net_cur = psutil.net_io_counters()
+
+            try:
+                down = max(0, (net_cur.bytes_recv - self.last_net.bytes_recv) / dt)
+                up = max(0, (net_cur.bytes_sent - self.last_net.bytes_sent) / dt)
+                total_net = down + up
+                self.network.set_data(
+                    network_rate_percent(total_net),
+                    format_network_speed(total_net),
+                    f"Down {format_network_speed(down)}",
+                    f"Up {format_network_speed(up)}",
+                    ""
+                )
+                self.last_net = net_cur
+            except Exception as e:
+                log_event(f"Network update failed: {e}", e)
+                self.network.set_data(0, "NET Error", "", "", "")
 
             if now - self.last_smart > SMART_REFRESH_SECONDS:
                 self.refresh_smart()
@@ -1581,14 +1991,6 @@ class Monitor(QWidget):
             self.rgb.update(cpu, gpu, ram_pct)
         except:
             pass
-
-        try:
-            now = time.time()
-            if self.process_hogs_enabled and now - self.last_process_refresh >= PROCESS_HOG_REFRESH_SECONDS:
-                self.refresh_process_hogs()
-                self.last_process_refresh = now
-        except Exception as e:
-            log_event(f"Process hog update failed: {e}", e)
 
 
 if __name__ == "__main__":
