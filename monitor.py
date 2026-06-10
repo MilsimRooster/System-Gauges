@@ -54,6 +54,8 @@ REFRESH_MS = 150
 SMART_REFRESH_SECONDS = 4
 PROCESS_HOG_REFRESH_SECONDS = 5
 TOP_HOGS_ENABLED_DEFAULT = True
+FRAME_RATE_TARGET_FPS = 60
+FRAME_RATE_UPDATE_SECONDS = 0.75
 SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
 UNKNOWN_SMART = ("?", "N/A")
 SMART_DEBUG = False
@@ -309,6 +311,12 @@ def rank_process_hogs(processes, limit=3):
 
 def top_hogs_button_text(enabled):
     return "Hide Top Hogs" if enabled else "Show Top Hogs"
+
+
+def frame_rate_percent(fps, target_fps=FRAME_RATE_TARGET_FPS):
+    if target_fps <= 0:
+        return 0
+    return int(max(0, min((fps / target_fps) * 100, 100)))
 
 
 # ====================== SMART ======================
@@ -974,6 +982,8 @@ class Monitor(QWidget):
         self.gpu_window_seconds = 1.6
         self.process_hogs_enabled = TOP_HOGS_ENABLED_DEFAULT
         self.last_process_refresh = 0
+        self.frame_tick_count = 0
+        self.frame_rate_last_time = time.time()
 
         self.last = psutil.disk_io_counters(perdisk=True)
         self.last_time = time.time()
@@ -1047,16 +1057,19 @@ class Monitor(QWidget):
         top_grid.setColumnStretch(0, 1)
         top_grid.setColumnStretch(1, 1)
         top_grid.setColumnStretch(2, 1)
+        top_grid.setColumnStretch(3, 1)
         drive_grid.setHorizontalSpacing(8)
         drive_grid.setVerticalSpacing(4)
 
         self.gpu = Gauge("GPU", preferred_size=250, minimum_size=80)
         self.ram = Gauge("RAM", preferred_size=250, minimum_size=80)
         self.cpu = Gauge("CPU", preferred_size=250, minimum_size=80)
+        self.frame_rate = Gauge("FPS", preferred_size=250, minimum_size=80)
 
         top_grid.addWidget(self.gpu, 0, 0)
         top_grid.addWidget(self.cpu, 0, 1)
         top_grid.addWidget(self.ram, 0, 2)
+        top_grid.addWidget(self.frame_rate, 0, 3)
 
         container_layout.addLayout(top_grid, 3)
 
@@ -1353,6 +1366,7 @@ class Monitor(QWidget):
         self.gpu.display_mode = self.display_mode
         self.ram.display_mode = self.display_mode
         self.cpu.display_mode = self.display_mode
+        self.frame_rate.display_mode = self.display_mode
         for g in self.disk_gauges.values():
             g.display_mode = self.display_mode
 
@@ -1471,8 +1485,28 @@ class Monitor(QWidget):
         self.gpu.tick()
         self.ram.tick()
         self.cpu.tick()
+        self.frame_rate.tick()
         for g in self.disk_gauges.values():
             g.tick()
+        self.update_frame_rate()
+
+    def update_frame_rate(self, now=None):
+        now = now or time.time()
+        self.frame_tick_count += 1
+        elapsed = now - self.frame_rate_last_time
+        if elapsed < FRAME_RATE_UPDATE_SECONDS:
+            return
+
+        fps = self.frame_tick_count / elapsed
+        self.frame_tick_count = 0
+        self.frame_rate_last_time = now
+        self.frame_rate.set_data(
+            frame_rate_percent(fps),
+            f"{fps:.0f} FPS",
+            "UI render",
+            "Game FPS later",
+            ""
+        )
 
     def safe_update_stats(self):
         try:
