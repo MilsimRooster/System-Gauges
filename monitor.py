@@ -7,6 +7,9 @@ import warnings
 import json
 import os
 import traceback
+import csv
+import shutil
+import tempfile
 from pathlib import Path
 import psutil
 import wmi
@@ -56,6 +59,9 @@ PROCESS_HOG_REFRESH_SECONDS = 5
 TOP_HOGS_ENABLED_DEFAULT = True
 FRAME_RATE_TARGET_FPS = 60
 FRAME_RATE_UPDATE_SECONDS = 0.75
+PRESENTMON_REFRESH_SECONDS = 5
+PRESENTMON_SAMPLE_SECONDS = 1.25
+PRESENTMON_EXE_NAMES = ("PresentMon.exe", "PresentMon-2.3.1-x64.exe")
 SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
 UNKNOWN_SMART = ("?", "N/A")
 SMART_DEBUG = False
@@ -349,6 +355,66 @@ def gauge_history_color_rgb(value, high_is_good=False):
     return (255, 60, 0)
 
 
+def _row_value(row, column_name):
+    wanted = column_name.lower()
+    for key, value in row.items():
+        if key and key.lower() == wanted:
+            return value
+    return None
+
+
+def parse_presentmon_fps(csv_text):
+    groups = {}
+    reader = csv.DictReader(csv_text.splitlines())
+    for row in reader:
+        app = (_row_value(row, "Application") or "").strip()
+        if not app or app.lower() == "systemgauges.exe":
+            continue
+
+        ms_text = _row_value(row, "MsBetweenPresents")
+        try:
+            ms = float(ms_text)
+        except (TypeError, ValueError):
+            continue
+        if ms <= 0:
+            continue
+
+        groups.setdefault(app, []).append(1000.0 / ms)
+
+    if not groups:
+        return None
+
+    app, values = max(groups.items(), key=lambda item: len(item[1]))
+    return {
+        "application": app,
+        "fps": sum(values) / len(values),
+        "frames": len(values),
+    }
+
+
+def find_presentmon_executable():
+    for exe_name in PRESENTMON_EXE_NAMES:
+        found = shutil.which(exe_name)
+        if found:
+            return found
+
+    app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    search_roots = [
+        app_dir,
+        app_dir / "tools",
+        app_dir / "PresentMon",
+    ]
+    for root in search_roots:
+        for exe_name in PRESENTMON_EXE_NAMES:
+            candidate = root / exe_name
+            if candidate.exists():
+                return str(candidate)
+        matches = sorted(root.glob("PresentMon*.exe"))
+        if matches:
+            return str(matches[0])
+    return None
+
+
 # ====================== SMART ======================
 def smartctl_exists():
     try:
@@ -514,6 +580,47 @@ class SmartWorker(QThread):
         except Exception as e:
             log_event(f"SMART worker failed: {e}", e)
         self.result_ready.emit(results)
+
+
+class PresentMonWorker(QThread):
+    result_ready = pyqtSignal(object)
+
+    def __init__(self, presentmon_path):
+        super().__init__()
+        self.presentmon_path = presentmon_path
+
+    def run(self):
+        output_file = Path(tempfile.gettempdir()) / f"systemgauges-presentmon-{os.getpid()}-{int(time.time() * 1000)}.csv"
+        try:
+            cmd = [
+                self.presentmon_path,
+                "--output_file",
+                str(output_file),
+                "--session_name",
+                "SystemGaugesFPS",
+                "--timed",
+                str(PRESENTMON_SAMPLE_SECONDS),
+                "--terminate_after_timed",
+            ]
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=PRESENTMON_SAMPLE_SECONDS + 4,
+            )
+            if output_file.exists():
+                self.result_ready.emit(parse_presentmon_fps(output_file.read_text(encoding="utf-8", errors="ignore")))
+            else:
+                self.result_ready.emit(None)
+        except Exception as e:
+            log_event(f"PresentMon sample failed: {e}", e)
+            self.result_ready.emit(None)
+        finally:
+            try:
+                output_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # RGB, Gauge, Monitor classes (full)
@@ -1010,6 +1117,11 @@ class Monitor(QWidget):
         self.last_process_refresh = 0
         self.frame_tick_count = 0
         self.frame_rate_last_time = time.time()
+        self.presentmon_path = find_presentmon_executable()
+        self.presentmon_worker = None
+        self.presentmon_workers = []
+        self.last_presentmon_refresh = 0
+        self.game_fps_reading = None
 
         self.last = psutil.disk_io_counters(perdisk=True)
         self.last_time = time.time()
@@ -1380,6 +1492,7 @@ class Monitor(QWidget):
         self.timer.stop()
         self.anim.stop()
         self.stop_smart_workers()
+        self.stop_presentmon_workers()
         QApplication.quit()
 
     def handle_tray_activated(self, reason):
@@ -1450,6 +1563,38 @@ class Monitor(QWidget):
             worker.deleteLater()
         self.smart_worker = None
 
+    def refresh_presentmon_fps(self):
+        if not self.presentmon_path:
+            return
+        if any(worker.isRunning() for worker in self.presentmon_workers):
+            return
+
+        worker = PresentMonWorker(self.presentmon_path)
+        self.presentmon_worker = worker
+        self.presentmon_workers.append(worker)
+        worker.result_ready.connect(self._presentmon_finished)
+        worker.finished.connect(lambda worker=worker: self._presentmon_worker_finished(worker))
+        worker.start()
+
+    def _presentmon_finished(self, result):
+        self.game_fps_reading = result
+
+    def _presentmon_worker_finished(self, worker):
+        if self.presentmon_worker is worker:
+            self.presentmon_worker = None
+        if worker in self.presentmon_workers:
+            self.presentmon_workers.remove(worker)
+        worker.deleteLater()
+
+    def stop_presentmon_workers(self):
+        for worker in list(self.presentmon_workers):
+            if worker.isRunning():
+                worker.wait(4000)
+            if worker in self.presentmon_workers:
+                self.presentmon_workers.remove(worker)
+            worker.deleteLater()
+        self.presentmon_worker = None
+
     def set_process_hogs_visible(self, visible):
         for row in self.process_rows:
             row.setVisible(visible)
@@ -1519,6 +1664,10 @@ class Monitor(QWidget):
     def update_frame_rate(self, now=None):
         now = now or time.time()
         self.frame_tick_count += 1
+        if self.presentmon_path and now - self.last_presentmon_refresh >= PRESENTMON_REFRESH_SECONDS:
+            self.refresh_presentmon_fps()
+            self.last_presentmon_refresh = now
+
         elapsed = now - self.frame_rate_last_time
         if elapsed < FRAME_RATE_UPDATE_SECONDS:
             return
@@ -1526,6 +1675,27 @@ class Monitor(QWidget):
         fps = self.frame_tick_count / elapsed
         self.frame_tick_count = 0
         self.frame_rate_last_time = now
+        if self.game_fps_reading:
+            game_fps = self.game_fps_reading["fps"]
+            self.frame_rate.set_data(
+                frame_rate_percent(game_fps, target_fps=120),
+                f"{game_fps:.0f} FPS",
+                self.game_fps_reading["application"],
+                "Game FPS",
+                ""
+            )
+            return
+
+        if self.presentmon_path:
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                "Waiting for game",
+                "PresentMon",
+                ""
+            )
+            return
+
         self.frame_rate.set_data(
             frame_rate_percent(fps),
             f"{fps:.0f} FPS",
