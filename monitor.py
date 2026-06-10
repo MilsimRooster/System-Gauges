@@ -319,6 +319,21 @@ def frame_rate_percent(fps, target_fps=FRAME_RATE_TARGET_FPS):
     return int(max(0, min((fps / target_fps) * 100, 100)))
 
 
+def gauge_color_rgb(value, high_is_good=False):
+    if high_is_good:
+        if value >= 60:
+            return (0, 200, 120)
+        if value >= 35:
+            return (255, 180, 0)
+        return (255, 70, 70)
+
+    if value < 60:
+        return (0, 200, 120)
+    if value < 85:
+        return (255, 180, 0)
+    return (255, 70, 70)
+
+
 # ====================== SMART ======================
 def smartctl_exists():
     try:
@@ -519,11 +534,12 @@ class RGBController:
 
 
 class Gauge(QWidget):
-    def __init__(self, title, preferred_size=230, minimum_size=70):
+    def __init__(self, title, preferred_size=230, minimum_size=70, high_is_good=False):
         super().__init__()
         self.title = title
         self.preferred_size = preferred_size
         self.minimum_size = minimum_size
+        self.high_is_good = high_is_good
         self.target = 0
         self.value = 0
         self.main = ""
@@ -572,12 +588,7 @@ class Gauge(QWidget):
         self.update()
 
     def color(self):
-        v = self.value
-        if v < 60:
-            return QColor(0, 200, 120)
-        elif v < 85:
-            return QColor(255, 180, 0)
-        return QColor(255, 70, 70)
+        return QColor(*gauge_color_rgb(self.value, self.high_is_good))
 
     def draw_waveform(self, painter: QPainter, rect: QRectF, alpha=140, glow=True):
         if len(self.history) == 0:
@@ -1064,7 +1075,7 @@ class Monitor(QWidget):
         self.gpu = Gauge("GPU", preferred_size=250, minimum_size=80)
         self.ram = Gauge("RAM", preferred_size=250, minimum_size=80)
         self.cpu = Gauge("CPU", preferred_size=250, minimum_size=80)
-        self.frame_rate = Gauge("FPS", preferred_size=250, minimum_size=80)
+        self.frame_rate = Gauge("FPS", preferred_size=250, minimum_size=80, high_is_good=True)
 
         top_grid.addWidget(self.gpu, 0, 0)
         top_grid.addWidget(self.cpu, 0, 1)
@@ -1504,7 +1515,7 @@ class Monitor(QWidget):
             frame_rate_percent(fps),
             f"{fps:.0f} FPS",
             "UI render",
-            "Game FPS later",
+            "",
             ""
         )
 
