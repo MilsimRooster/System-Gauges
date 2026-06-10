@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from monitor import frame_rate_percent, gauge_color_rgb
+from monitor import frame_rate_percent, gauge_color_rgb, gauge_history_color_rgb
 
 
 class FrameRateGaugeTests(unittest.TestCase):
@@ -21,6 +21,10 @@ class FrameRateGaugeTests(unittest.TestCase):
     def test_frame_rate_gauge_treats_high_fps_as_good(self):
         self.assertEqual(gauge_color_rgb(100, high_is_good=True), (0, 200, 120))
         self.assertEqual(gauge_color_rgb(100), (255, 70, 70))
+
+    def test_frame_rate_history_graph_treats_high_fps_as_good(self):
+        self.assertEqual(gauge_history_color_rgb(100, high_is_good=True), (0, 255, 120))
+        self.assertEqual(gauge_history_color_rgb(100), (255, 60, 0))
 
     def test_monitor_source_wires_frame_rate_gauge(self):
         source = (Path(__file__).resolve().parents[1] / "monitor.py").read_text(encoding="utf-8")

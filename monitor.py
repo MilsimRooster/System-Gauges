@@ -334,6 +334,21 @@ def gauge_color_rgb(value, high_is_good=False):
     return (255, 70, 70)
 
 
+def gauge_history_color_rgb(value, high_is_good=False):
+    if high_is_good:
+        if value >= 50:
+            return (0, 255, 120)
+        if value >= 20:
+            return (255, 200, 0)
+        return (255, 60, 0)
+
+    if value < 50:
+        return (0, 255, 120)
+    if value < 80:
+        return (255, 200, 0)
+    return (255, 60, 0)
+
+
 # ====================== SMART ======================
 def smartctl_exists():
     try:
@@ -613,7 +628,7 @@ class Gauge(QWidget):
             bar_w_int = int(bar_width)
             bar_h_int = int(bar_h)
 
-            color = QColor(0, 255, 120) if val < 50 else QColor(255, 200, 0) if val < 80 else QColor(255, 60, 0)
+            color = QColor(*gauge_history_color_rgb(val, self.high_is_good))
             if self.uses_image_background():
                 color.setAlpha(220)
 
@@ -658,7 +673,7 @@ class Gauge(QWidget):
                 center.x() + (base_radius + bar_len) * math.cos(angle),
                 center.y() - (base_radius + bar_len) * math.sin(angle)
             )
-            color = QColor(0, 255, 120) if val < 50 else QColor(255, 200, 0) if val < 80 else QColor(255, 60, 0)
+            color = QColor(*gauge_history_color_rgb(val, self.high_is_good))
             color.setAlpha(145 if self.uses_image_background() else 175)
             painter.setPen(QPen(color, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawLine(inner, outer)
