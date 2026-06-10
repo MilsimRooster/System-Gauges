@@ -1,7 +1,6 @@
 import argparse
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -23,7 +22,7 @@ def main():
         print("FAIL: PresentMon console executable was not found.")
         return 2
 
-    output_file = Path(tempfile.gettempdir()) / f"systemgauges-fps-verify-{int(time.time() * 1000)}.csv"
+    output_file = REPO_ROOT / "dist" / f"systemgauges-fps-verify-{int(time.time() * 1000)}.csv"
     packaged_app = REPO_ROOT / "dist" / "FpsWireTest.exe"
     if packaged_app.exists():
         app_command = [str(packaged_app), "--seconds", str(args.seconds + 4), "--fps", str(args.fps)]
@@ -44,12 +43,12 @@ def main():
         result = subprocess.run(
             [
                 presentmon,
-                "--process_id",
-                str(app.pid),
                 "--output_file",
                 str(output_file),
                 "--session_name",
                 "SystemGaugesVerify",
+                "--set_circular_buffer_size",
+                "65536",
                 "--timed",
                 str(args.seconds),
                 "--terminate_after_timed",
@@ -61,16 +60,13 @@ def main():
         )
 
         output = (result.stdout or "") + (result.stderr or "")
-        if not output_file.exists():
+        reading = None
+        if output_file.exists():
+            reading = parse_presentmon_fps(output_file.read_text(encoding="utf-8", errors="ignore"))
+        if not reading:
             print(f"FAIL: {presentmon_failure_message(output)}")
             if output.strip():
                 print(output.strip())
-            return 1
-
-        reading = parse_presentmon_fps(output_file.read_text(encoding="utf-8", errors="ignore"))
-        if not reading:
-            print(f"FAIL: {presentmon_failure_message(output)}")
-            print(f"CSV: {output_file}")
             return 1
 
         print(f"PASS: {reading['application']} {reading['fps']:.1f} FPS over {reading['frames']} frames")

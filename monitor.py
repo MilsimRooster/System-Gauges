@@ -9,7 +9,6 @@ import os
 import traceback
 import csv
 import shutil
-import tempfile
 from pathlib import Path
 import psutil
 import wmi
@@ -377,17 +376,18 @@ def gauge_history_color_rgb(value, high_is_good=False):
 def _row_value(row, column_name):
     wanted = column_name.lower()
     for key, value in row.items():
-        if key and key.lower() == wanted:
+        if key and key.strip().lstrip("\ufeff").lower() == wanted:
             return value
     return None
 
 
 def parse_presentmon_fps(csv_text):
     groups = {}
+    ignored_apps = {"systemgauges.exe", "codex.exe", "presentmon.exe", "presentmon-2.4.1-x64.exe"}
     reader = csv.DictReader(csv_text.splitlines())
     for row in reader:
         app = (_row_value(row, "Application") or "").strip()
-        if not app or app.lower() == "systemgauges.exe":
+        if not app or app.lower() in ignored_apps:
             continue
 
         ms_text = _row_value(row, "MsBetweenPresents")
@@ -413,8 +413,10 @@ def parse_presentmon_fps(csv_text):
 
 def presentmon_failure_message(output):
     text = (output or "").lower()
-    if "access denied" in text or "elevated privilege" in text or "performance log users" in text:
+    if "access denied" in text:
         return "Needs admin or PerfLog"
+    if "etw events were lost" in text:
+        return "Run elevated"
     if "failed to start trace session" in text:
         return "PresentMon trace failed"
     return "No game frames"
@@ -620,7 +622,9 @@ class PresentMonWorker(QThread):
         self.presentmon_path = presentmon_path
 
     def run(self):
-        output_file = Path(tempfile.gettempdir()) / f"systemgauges-presentmon-{os.getpid()}-{int(time.time() * 1000)}.csv"
+        output_dir = config_path().parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"presentmon-{os.getpid()}-{int(time.time() * 1000)}.csv"
         try:
             cmd = [
                 self.presentmon_path,
@@ -628,6 +632,8 @@ class PresentMonWorker(QThread):
                 str(output_file),
                 "--session_name",
                 "SystemGaugesFPS",
+                "--set_circular_buffer_size",
+                "65536",
                 "--timed",
                 str(PRESENTMON_SAMPLE_SECONDS),
                 "--terminate_after_timed",
@@ -640,11 +646,11 @@ class PresentMonWorker(QThread):
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 timeout=PRESENTMON_SAMPLE_SECONDS + 4,
             )
+            output = (result.stdout or "") + (result.stderr or "")
+            reading = None
             if output_file.exists():
                 reading = parse_presentmon_fps(output_file.read_text(encoding="utf-8", errors="ignore"))
-                self.result_ready.emit(reading or {"error": presentmon_failure_message((result.stdout or "") + (result.stderr or ""))})
-            else:
-                self.result_ready.emit({"error": presentmon_failure_message((result.stdout or "") + (result.stderr or ""))})
+            self.result_ready.emit(reading or {"error": presentmon_failure_message(output)})
         except Exception as e:
             log_event(f"PresentMon sample failed: {e}", e)
             self.result_ready.emit({"error": "PresentMon error"})

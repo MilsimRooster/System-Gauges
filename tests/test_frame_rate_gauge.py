@@ -34,8 +34,9 @@ class FrameRateGaugeTests(unittest.TestCase):
 
     def test_parse_presentmon_fps_uses_largest_non_systemgauges_capture(self):
         csv_text = "\n".join([
-            "Application,ProcessID,MsBetweenPresents",
+            "\ufeffApplication,ProcessID,MsBetweenPresents",
             "SystemGauges.exe,100,10",
+            "Codex.exe,101,16.6667",
             "CoolGame.exe,200,16.6667",
             "CoolGame.exe,200,16.6667",
             "Launcher.exe,300,33.3333",
@@ -61,6 +62,24 @@ class FrameRateGaugeTests(unittest.TestCase):
 
         self.assertEqual(presentmon_failure_message(output), "Needs admin or PerfLog")
 
+    def test_presentmon_failure_message_does_not_treat_warning_as_failure(self):
+        output = "\n".join([
+            "Started recording.",
+            "Stopped recording.",
+            "warning: PresentMon requires elevated privilege in order to query processes",
+        ])
+
+        self.assertEqual(presentmon_failure_message(output), "No game frames")
+
+    def test_presentmon_failure_message_explains_lost_etw_events(self):
+        output = "\n".join([
+            "Started recording.",
+            "Stopped recording.",
+            "warning: 27030 ETW events were lost.",
+        ])
+
+        self.assertEqual(presentmon_failure_message(output), "Run elevated")
+
     def test_monitor_source_wires_frame_rate_gauge(self):
         source = (Path(__file__).resolve().parents[1] / "monitor.py").read_text(encoding="utf-8")
 
@@ -71,6 +90,7 @@ class FrameRateGaugeTests(unittest.TestCase):
         self.assertIn("PresentMonWorker", source)
         self.assertIn("find_presentmon_executable", source)
         self.assertIn("PresentMonConsoleApplication", source)
+        self.assertIn("--output_file", source)
         self.assertIn('"Game FPS"', source)
         self.assertIn('"UI render"', source)
         self.assertNotIn('"Game FPS later"', source)
