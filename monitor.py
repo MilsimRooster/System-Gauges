@@ -20,7 +20,10 @@ warnings.filterwarnings(
     message=r"The pynvml package is deprecated.*",
     category=FutureWarning,
 )
-import pynvml
+try:
+    import pynvml
+except ImportError:
+    pynvml = None
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QThread, pyqtSignal
 from PyQt6.QtGui import (
@@ -231,6 +234,8 @@ def decode_nvml_name(name):
 
 
 def select_nvml_gpu_handle():
+    if pynvml is None:
+        raise RuntimeError("NVML support is not installed")
     pynvml.nvmlInit()
     count = pynvml.nvmlDeviceGetCount()
     preferred_terms = ("rtx", "gtx", "nvidia", "geforce", "quadro")
@@ -248,6 +253,79 @@ def select_nvml_gpu_handle():
     if first_handle is None:
         raise RuntimeError("No NVML GPU devices found")
     return first_handle, first_name
+
+
+def select_display_gpu_adapter(adapters):
+    adapter_list = list(adapters or [])
+    if not adapter_list:
+        return None
+
+    ignored_terms = ("basic render", "remote", "mirror", "virtual display")
+    hardware = [
+        adapter for adapter in adapter_list
+        if not any(term in str(getattr(adapter, "Name", "")).lower() for term in ignored_terms)
+    ]
+    candidates = hardware or adapter_list
+    preferred_terms = ("nvidia", "geforce", "rtx", "gtx", "radeon", "amd", "intel", "iris", "arc", "uhd")
+    for adapter in candidates:
+        name = str(getattr(adapter, "Name", "") or "")
+        if any(term in name.lower() for term in preferred_terms):
+            return adapter
+    return candidates[0]
+
+
+def calculate_wmi_gpu_percent(engine_rows):
+    values = []
+    three_d_values = []
+    for row in engine_rows or []:
+        try:
+            value = int(float(getattr(row, "UtilizationPercentage", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        value = max(0, min(100, value))
+        values.append(value)
+        if "engtype_3d" in str(getattr(row, "Name", "")).lower():
+            three_d_values.append(value)
+    return max(three_d_values or values or [0])
+
+
+def format_adapter_ram(adapter):
+    try:
+        ram = int(getattr(adapter, "AdapterRAM", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if ram <= 0:
+        return ""
+    return f"VRAM {ram / (1024 ** 3):.1f} GB"
+
+
+class GenericGpuReader:
+    def __init__(self, wmi_factory=None):
+        self.wmi_factory = wmi_factory or wmi.WMI
+        self.adapter = None
+
+    def read(self):
+        client = self.wmi_factory()
+        if self.adapter is None:
+            try:
+                self.adapter = select_display_gpu_adapter(client.Win32_VideoController())
+            except Exception as e:
+                log_event(f"Generic GPU adapter lookup failed: {e}", e)
+        try:
+            percent = calculate_wmi_gpu_percent(
+                client.Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine()
+            )
+        except Exception as e:
+            log_event(f"Generic GPU utilization lookup failed: {e}", e)
+            percent = 0
+        name = str(getattr(self.adapter, "Name", "") or "GPU") if self.adapter else "GPU"
+        return {
+            "percent": percent,
+            "name": name,
+            "temp_text": "Temp N/A",
+            "memory_text": format_adapter_ram(self.adapter),
+            "power_text": "Generic GPU",
+        }
 
 
 def format_temp(c):
@@ -1208,6 +1286,7 @@ class Monitor(QWidget):
             self.setWindowIcon(self.app_icon)
         self.gpu_handle = None
         self.gpu_name = ""
+        self.generic_gpu = GenericGpuReader()
         self.last_gpu_init_attempt = 0
         self.gpu_init_retry_seconds = 10
         try:
@@ -1816,7 +1895,15 @@ class Monitor(QWidget):
                 self.gpu.set_data(gpu_display, f"{gpu_display:.0f}%", f"{c_to_f(temp)}°F",
                                   f"VRAM {vram_used_gb:.1f}/{vram_total_gb:.1f} GB", power_text)
             else:
-                self.gpu.set_data(0, "0%", "N/A", "", "")
+                reading = self.generic_gpu.read()
+                gpu_display = int(reading["percent"])
+                self.gpu.set_data(
+                    gpu_display,
+                    f"{gpu_display:.0f}%",
+                    reading["temp_text"],
+                    reading["memory_text"],
+                    reading["name"],
+                )
         except Exception as e:
             log_event(f"GPU update failed: {e}", e)
             self.gpu.set_data(0, "GPU Error", "", "", "")

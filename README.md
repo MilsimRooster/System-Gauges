@@ -7,7 +7,7 @@ System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, a
 ## Features
 
 - CPU load, frequency, core/thread count, and usage gauge.
-- NVIDIA GPU usage, temperature, VRAM, and power draw through NVML.
+- Generic Windows GPU usage for Intel, AMD, NVIDIA, and integrated adapters, with richer NVIDIA details when NVML is available.
 - RAM usage, available memory, and color-coded warning states.
 - Drive activity, SMART temperature, and SMART health for SATA/SSD/NVMe drives.
 - Smooth animated gauge rings with tracer effects.
@@ -19,16 +19,16 @@ System Gauges is a polished Windows desktop telemetry panel for CPU, GPU, RAM, a
 
 - Windows 10 or newer.
 - Python 3.11+.
-- NVIDIA GPU and current NVIDIA drivers for GPU telemetry.
 - [smartmontools](https://www.smartmontools.org/) installed at `C:\Program Files\smartmontools\bin\smartctl.exe`.
 
 Install Python dependencies:
 
 ```powershell
-pip install PyQt6 psutil WMI pywin32 nvidia-ml-py openrgb-python
+pip install PyQt6 psutil WMI pywin32 openrgb-python
 ```
 
 `openrgb-python` is optional. If OpenRGB is not installed/running, the monitor still works; RGB sync is skipped.
+`nvidia-ml-py` is optional. Install it only if you want NVML-backed NVIDIA temperature, VRAM, and power details.
 
 ## Usage
 
@@ -81,10 +81,9 @@ Top Hogs:
 
 ## Notes
 
-- GPU telemetry is NVIDIA-only.
+- GPU telemetry uses Windows counters by default, so it can report Intel, AMD, NVIDIA, and integrated adapters. NVIDIA systems can optionally use NVML for temperature, VRAM, and power details.
 - SMART data is refreshed less often than CPU/GPU/RAM to avoid excessive disk queries.
 - Drive tiles intentionally show activity speed, temperature, and health only.
-- The `nvidia-ml-py` package is imported as `pynvml`; this is expected.
 - Custom image backgrounds use a fixed dark overlay in this build; opacity and blur controls are planned for a later pass.
 
 ## Build EXE
