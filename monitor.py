@@ -43,21 +43,17 @@ from PyQt6.QtWidgets import (
     QWidget,
     QGridLayout,
     QHBoxLayout,
-    QProgressBar,
     QScrollArea,
     QVBoxLayout,
     QSystemTrayIcon,
     QMenu,
     QStyle,
-    QLabel,
     QPushButton,
     QSizePolicy,
     QFileDialog
 )
 REFRESH_MS = 150
 SMART_REFRESH_SECONDS = 4
-PROCESS_HOG_REFRESH_SECONDS = 5
-TOP_HOGS_ENABLED_DEFAULT = True
 FRAME_RATE_TARGET_FPS = 60
 FRAME_RATE_UPDATE_SECONDS = 0.75
 PRESENTMON_REFRESH_SECONDS = 5
@@ -307,38 +303,6 @@ def format_bytes(value):
 
 def format_disk_rate(bytes_per_sec):
     return f"{format_bytes(bytes_per_sec)}/s"
-
-
-def is_ignored_process_hog(process):
-    pid = process.get("pid")
-    name = (process.get("name") or "").strip().lower()
-    return pid == 0 or name == "system idle process"
-
-
-def calculate_hog_score(process):
-    memory = max(0.0, float(process.get("memory_percent") or 0.0))
-    return memory
-
-
-def rank_process_hogs(processes, limit=3):
-    ranked = []
-    for process in processes:
-        if is_ignored_process_hog(process):
-            continue
-        process = dict(process)
-        score = calculate_hog_score(process)
-        if score <= 0:
-            continue
-        item = dict(process)
-        item["hog_score"] = score
-        ranked.append(item)
-
-    ranked.sort(key=lambda item: item["hog_score"], reverse=True)
-    return ranked[:limit]
-
-
-def top_hogs_button_text(enabled):
-    return "Hide Top Hogs" if enabled else "Show Top Hogs"
 
 
 def frame_rate_percent(fps, target_fps=FRAME_RATE_TARGET_FPS):
@@ -1215,73 +1179,6 @@ class Gauge(QWidget):
             self.draw_arc_waveform(p, arc, size)
 
 
-class ProcessHogRow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setMinimumHeight(42)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        layout = QGridLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(2)
-
-        self.name_label = QLabel("Idle")
-        self.name_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #f3fbff; background: transparent;")
-        self.score_label = QLabel("Score 0")
-        self.score_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.score_label.setStyleSheet("font-size: 11px; color: #a9d8ff; background: transparent;")
-        self.detail_label = QLabel("Waiting for process activity")
-        self.detail_label.setStyleSheet("font-size: 10px; color: #9aa8b5; background: transparent;")
-
-        bar_layout = QHBoxLayout()
-        bar_layout.setContentsMargins(0, 0, 0, 0)
-        bar_layout.setSpacing(5)
-        self.ram_bar = self._make_bar("#f0b429")
-        bar_layout.addWidget(self.ram_bar)
-
-        layout.addWidget(self.name_label, 0, 0)
-        layout.addWidget(self.score_label, 0, 1)
-        layout.addWidget(self.detail_label, 1, 0)
-        layout.addLayout(bar_layout, 1, 1)
-        layout.setColumnStretch(0, 3)
-        layout.setColumnStretch(1, 2)
-
-    def _make_bar(self, color):
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        bar.setTextVisible(False)
-        bar.setFixedHeight(7)
-        bar.setStyleSheet(f"""
-            QProgressBar {{
-                background: rgba(37, 43, 49, 180);
-                border: 0;
-                border-radius: 2px;
-            }}
-            QProgressBar::chunk {{
-                background: {color};
-                border-radius: 2px;
-            }}
-        """)
-        return bar
-
-    def set_idle(self):
-        self.name_label.setText("Idle")
-        self.score_label.setText("RAM 0.0%")
-        self.detail_label.setText("Waiting for process activity")
-        self.ram_bar.setValue(0)
-
-    def set_process(self, process):
-        name = process.get("name") or "Unknown"
-        pid = process.get("pid", "?")
-        memory = float(process.get("memory_percent") or 0.0)
-
-        self.name_label.setText(f"{name}  ({pid})")
-        self.score_label.setText(f"RAM {memory:.1f}%")
-        self.detail_label.setText("Memory share")
-        self.ram_bar.setValue(int(max(0, min(memory * 3, 100))))
-
-
 class Monitor(QWidget):
     def __init__(self):
         super().__init__()
@@ -1322,8 +1219,6 @@ class Monitor(QWidget):
 
         self.gpu_samples = []
         self.gpu_window_seconds = 1.6
-        self.process_hogs_enabled = TOP_HOGS_ENABLED_DEFAULT
-        self.last_process_refresh = 0
         self.frame_tick_count = 0
         self.frame_rate_last_time = time.time()
         self.rtss_path = find_rtss_executable()
@@ -1398,38 +1293,46 @@ class Monitor(QWidget):
         container.setAutoFillBackground(False)
         container_layout = QVBoxLayout(container)
         top_grid = QGridLayout()
+        top_grid_wrapper = QHBoxLayout()
         drive_grid = QGridLayout()
+        drive_grid_wrapper = QHBoxLayout()
 
-        container_layout.setContentsMargins(8, 8, 8, 8)
-        container_layout.setSpacing(6)
+        container_layout.setContentsMargins(8, 4, 8, 6)
+        container_layout.setSpacing(2)
+        top_grid_wrapper.setContentsMargins(0, 0, 0, 0)
+        top_grid_wrapper.setSpacing(0)
+        top_grid.setContentsMargins(0, 0, 0, 0)
         top_grid.setHorizontalSpacing(10)
-        top_grid.setVerticalSpacing(6)
-        top_grid.setColumnStretch(0, 1)
-        top_grid.setColumnStretch(1, 1)
-        top_grid.setColumnStretch(2, 1)
-        top_grid.setColumnStretch(3, 1)
-        top_grid.setColumnStretch(4, 1)
+        top_grid.setVerticalSpacing(0)
+        for col in range(6):
+            top_grid.setColumnStretch(col, 1)
+        drive_grid_wrapper.setContentsMargins(0, 0, 0, 0)
+        drive_grid_wrapper.setSpacing(0)
+        drive_grid.setContentsMargins(0, 0, 0, 0)
         drive_grid.setHorizontalSpacing(8)
-        drive_grid.setVerticalSpacing(4)
+        drive_grid.setVerticalSpacing(0)
 
-        self.gpu = Gauge("GPU", preferred_size=250, minimum_size=80)
-        self.ram = Gauge("RAM", preferred_size=250, minimum_size=80)
-        self.cpu = Gauge("CPU", preferred_size=250, minimum_size=80)
-        self.frame_rate = Gauge("FPS", preferred_size=250, minimum_size=80, high_is_good=True)
-        self.network = Gauge("NET", preferred_size=250, minimum_size=80)
+        self.gpu = Gauge("GPU", preferred_size=226, minimum_size=80)
+        self.ram = Gauge("RAM", preferred_size=226, minimum_size=80)
+        self.cpu = Gauge("CPU", preferred_size=226, minimum_size=80)
+        self.frame_rate = Gauge("FPS", preferred_size=226, minimum_size=80, high_is_good=True)
+        self.network = Gauge("NET", preferred_size=226, minimum_size=80)
 
-        top_grid.addWidget(self.gpu, 0, 0)
-        top_grid.addWidget(self.cpu, 0, 1)
-        top_grid.addWidget(self.ram, 0, 2)
-        top_grid.addWidget(self.frame_rate, 0, 3)
-        top_grid.addWidget(self.network, 0, 4)
+        top_grid.addWidget(self.gpu, 0, 0, 1, 2)
+        top_grid.addWidget(self.cpu, 0, 2, 1, 2)
+        top_grid.addWidget(self.ram, 0, 4, 1, 2)
+        top_grid.addWidget(self.frame_rate, 1, 1, 1, 2)
+        top_grid.addWidget(self.network, 1, 3, 1, 2)
 
-        container_layout.addLayout(top_grid, 3)
+        top_grid_wrapper.addStretch(1)
+        top_grid_wrapper.addLayout(top_grid)
+        top_grid_wrapper.addStretch(1)
+        container_layout.addLayout(top_grid_wrapper)
 
         self.disk_gauges = {}
 
         for i, d in enumerate(self.disks):
-            g = Gauge(self.labels[i], preferred_size=178, minimum_size=64)
+            g = Gauge(self.labels[i], preferred_size=148, minimum_size=60)
             g.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.disk_gauges[d] = g
             row = i // 4
@@ -1439,56 +1342,10 @@ class Monitor(QWidget):
         for col in range(4):
             drive_grid.setColumnStretch(col, 1)
 
-        container_layout.addLayout(drive_grid, 1)
-
-        self.hog_header = QWidget()
-        self.hog_header.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.hog_header.setAutoFillBackground(False)
-        hog_header_layout = QHBoxLayout(self.hog_header)
-        hog_header_layout.setContentsMargins(2, 2, 2, 0)
-        hog_header_layout.setSpacing(8)
-
-        self.hog_title = QLabel("Top Hogs")
-        self.hog_title.setStyleSheet("""
-            color: #a9d8ff;
-            font-size: 12px;
-            font-weight: 600;
-            background: transparent;
-            padding: 0;
-        """)
-        self.hog_toggle_button = QPushButton(top_hogs_button_text(self.process_hogs_enabled))
-        self.hog_toggle_button.setCheckable(True)
-        self.hog_toggle_button.setChecked(self.process_hogs_enabled)
-        self.hog_toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.hog_toggle_button.setStyleSheet("""
-            QPushButton {
-                color: #dff4ff;
-                background: rgba(17, 26, 42, 190);
-                border: 1px solid rgba(169, 216, 255, 130);
-                border-radius: 3px;
-                padding: 3px 8px;
-                font-size: 10px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: rgba(23, 42, 62, 220);
-            }
-            QPushButton:checked {
-                color: #07130f;
-                background: #00c878;
-                border-color: #00e08a;
-            }
-        """)
-        self.hog_toggle_button.toggled.connect(self.set_process_hogs_enabled)
-        hog_header_layout.addWidget(self.hog_title)
-        hog_header_layout.addStretch(1)
-        hog_header_layout.addWidget(self.hog_toggle_button)
-        container_layout.addWidget(self.hog_header)
-
-        self.process_rows = [ProcessHogRow() for _ in range(3)]
-        for row in self.process_rows:
-            container_layout.addWidget(row)
-        self.set_process_hogs_visible(self.process_hogs_enabled)
+        drive_grid_wrapper.addStretch(1)
+        drive_grid_wrapper.addLayout(drive_grid)
+        drive_grid_wrapper.addStretch(1)
+        container_layout.addLayout(drive_grid_wrapper)
 
         self.main_scroll.setWidget(container)
         layout.addWidget(self.main_scroll)
@@ -1513,18 +1370,13 @@ class Monitor(QWidget):
         show = QAction("Show", self)
         hide = QAction("Hide", self)
         exit = QAction("Exit", self)
-        self.top_hogs_action = QAction(top_hogs_button_text(self.process_hogs_enabled), self)
-        self.top_hogs_action.setCheckable(True)
-        self.top_hogs_action.setChecked(self.process_hogs_enabled)
 
         show.triggered.connect(self.show)
         hide.triggered.connect(self.hide)
         exit.triggered.connect(self.exit_app)
-        self.top_hogs_action.triggered.connect(self.set_process_hogs_enabled)
 
         menu.addAction(show)
         menu.addAction(hide)
-        menu.addAction(self.top_hogs_action)
         menu.addSeparator()
 
         menu.addMenu(self.create_background_menu("Background Skin"))
@@ -1813,57 +1665,6 @@ class Monitor(QWidget):
             worker.deleteLater()
         self.presentmon_worker = None
 
-    def set_process_hogs_visible(self, visible):
-        for row in self.process_rows:
-            row.setVisible(visible)
-        self.update_top_hogs_controls()
-
-    def update_top_hogs_controls(self):
-        if hasattr(self, "hog_toggle_button"):
-            self.hog_toggle_button.blockSignals(True)
-            self.hog_toggle_button.setChecked(self.process_hogs_enabled)
-            self.hog_toggle_button.setText(top_hogs_button_text(self.process_hogs_enabled))
-            self.hog_toggle_button.blockSignals(False)
-        if hasattr(self, "top_hogs_action"):
-            self.top_hogs_action.blockSignals(True)
-            self.top_hogs_action.setChecked(self.process_hogs_enabled)
-            self.top_hogs_action.setText(top_hogs_button_text(self.process_hogs_enabled))
-            self.top_hogs_action.blockSignals(False)
-
-    def set_process_hogs_enabled(self, enabled):
-        self.process_hogs_enabled = bool(enabled)
-        self.set_process_hogs_visible(self.process_hogs_enabled)
-        if self.process_hogs_enabled:
-            self.last_process_refresh = 0
-            self.refresh_process_hogs()
-        else:
-            for row in self.process_rows:
-                row.set_idle()
-
-    def refresh_process_hogs(self):
-        processes = []
-
-        for proc in psutil.process_iter(["pid", "name"]):
-            try:
-                pid = proc.info.get("pid")
-                name = proc.info.get("name") or proc.name() or "Unknown"
-                memory = proc.memory_percent()
-
-                processes.append({
-                    "pid": pid,
-                    "name": name,
-                    "memory_percent": memory,
-                })
-            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-                continue
-
-        ranked = rank_process_hogs(processes, limit=3)
-        for index, row in enumerate(self.process_rows):
-            if index < len(ranked):
-                row.set_process(ranked[index])
-            else:
-                row.set_idle()
-
     def safe_animate(self):
         try:
             self.animate()
@@ -2103,14 +1904,6 @@ class Monitor(QWidget):
             self.rgb.update(cpu, gpu, ram_pct)
         except:
             pass
-
-        try:
-            now = time.time()
-            if self.process_hogs_enabled and now - self.last_process_refresh >= PROCESS_HOG_REFRESH_SECONDS:
-                self.refresh_process_hogs()
-                self.last_process_refresh = now
-        except Exception as e:
-            log_event(f"Process hog update failed: {e}", e)
 
 
 if __name__ == "__main__":

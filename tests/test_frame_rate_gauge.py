@@ -144,7 +144,7 @@ class FrameRateGaugeTests(unittest.TestCase):
     def test_monitor_source_wires_frame_rate_gauge(self):
         source = (Path(__file__).resolve().parents[1] / "monitor.py").read_text(encoding="utf-8")
 
-        self.assertIn('Gauge("FPS", preferred_size=250, minimum_size=80, high_is_good=True)', source)
+        self.assertIn('Gauge("FPS", preferred_size=226, minimum_size=80, high_is_good=True)', source)
         self.assertIn("self.frame_rate", source)
         self.assertIn("update_frame_rate", source)
         self.assertIn("PresentMon", source)
