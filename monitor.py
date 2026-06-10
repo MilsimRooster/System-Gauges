@@ -9,6 +9,8 @@ import os
 import traceback
 import csv
 import shutil
+import ctypes
+import struct
 from pathlib import Path
 import psutil
 import wmi
@@ -61,6 +63,8 @@ FRAME_RATE_UPDATE_SECONDS = 0.75
 PRESENTMON_REFRESH_SECONDS = 5
 PRESENTMON_SAMPLE_SECONDS = 1.25
 PRESENTMON_EXE_NAMES = ("PresentMon.exe", "PresentMon-2.3.1-x64.exe")
+RTSS_SHARED_MEMORY_NAME = "RTSSSharedMemoryV2"
+RTSS_SIGNATURE = struct.unpack("<I", b"RTSS")[0]
 NETWORK_TARGET_MBPS = 100
 SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
 UNKNOWN_SMART = ("?", "N/A")
@@ -411,6 +415,129 @@ def parse_presentmon_fps(csv_text):
     }
 
 
+def _decode_c_string(value):
+    raw = value.split(b"\0", 1)[0]
+    return raw.decode("mbcs", errors="ignore").strip()
+
+
+def _rtss_entry_reading(data, offset):
+    if len(data) < offset + 284:
+        return None
+
+    process_id = struct.unpack_from("<I", data, offset)[0]
+    name = _decode_c_string(data[offset + 4:offset + 264])
+    if not process_id or not name:
+        return None
+
+    ignored_apps = {
+        "systemgauges.exe",
+        "codex.exe",
+        "presentmon.exe",
+        "presentmon-2.4.1-x64.exe",
+        "rtss.exe",
+        "rtsshooksloader.exe",
+        "rtsshooksloader64.exe",
+    }
+    if name.lower() in ignored_apps:
+        return None
+
+    time0, time1, frames, frame_time = struct.unpack_from("<IIII", data, offset + 268)
+    fps = None
+    if time0 and time1 > time0 and frames:
+        fps = 1000.0 * frames / (time1 - time0)
+    elif frame_time:
+        fps = 1000000.0 / frame_time
+
+    if fps is None or fps <= 0 or not math.isfinite(fps):
+        return None
+
+    return {
+        "application": name,
+        "fps": fps,
+        "frames": frames,
+        "time1": time1,
+        "source": "RTSS",
+    }
+
+
+def parse_rtss_fps_snapshot(data):
+    if not data or len(data) < 20:
+        return None
+
+    signature, version, entry_size, app_offset, app_count = struct.unpack_from("<IIIII", data, 0)
+    if signature != RTSS_SIGNATURE or (version >> 16) != 2:
+        return None
+    if entry_size <= 0 or app_offset <= 0 or app_count <= 0:
+        return None
+
+    readings = []
+    max_count = min(app_count, 512)
+    for index in range(max_count):
+        offset = app_offset + (index * entry_size)
+        if offset + min(entry_size, 284) > len(data):
+            break
+        reading = _rtss_entry_reading(data, offset)
+        if reading:
+            reading["index"] = index
+            readings.append(reading)
+
+    if not readings:
+        return None
+
+    foreground_index = None
+    if len(data) >= 68:
+        foreground_index = struct.unpack_from("<I", data, 64)[0]
+        for reading in readings:
+            if reading["index"] == foreground_index:
+                return reading
+
+    return max(readings, key=lambda item: item.get("time1", 0))
+
+
+def read_rtss_shared_memory_snapshot():
+    if os.name != "nt":
+        return None
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenFileMappingW.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
+    kernel32.OpenFileMappingW.restype = ctypes.c_void_p
+    kernel32.MapViewOfFile.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_size_t]
+    kernel32.MapViewOfFile.restype = ctypes.c_void_p
+    kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    file_map_read = 0x0004
+    handle = kernel32.OpenFileMappingW(file_map_read, False, RTSS_SHARED_MEMORY_NAME)
+    if not handle:
+        return None
+
+    view = None
+    try:
+        view = kernel32.MapViewOfFile(handle, file_map_read, 0, 0, 0)
+        if not view:
+            return None
+
+        header = ctypes.string_at(view, 68)
+        signature, version, entry_size, app_offset, app_count = struct.unpack_from("<IIIII", header, 0)
+        if signature != RTSS_SIGNATURE or (version >> 16) != 2:
+            return None
+
+        needed = app_offset + (min(app_count, 512) * entry_size)
+        if needed <= 0 or needed > 8 * 1024 * 1024:
+            return None
+        return ctypes.string_at(view, needed)
+    except Exception as e:
+        log_event(f"RTSS shared memory read failed: {e}", e)
+        return None
+    finally:
+        if view:
+            kernel32.UnmapViewOfFile(view)
+        kernel32.CloseHandle(handle)
+
+
+def read_rtss_fps():
+    return parse_rtss_fps_snapshot(read_rtss_shared_memory_snapshot())
+
+
 def presentmon_failure_message(output):
     text = (output or "").lower()
     if "access denied" in text:
@@ -445,6 +572,50 @@ def find_presentmon_executable():
         if matches:
             return str(matches[0])
     return None
+
+
+def find_rtss_executable():
+    found = shutil.which("RTSS.exe")
+    if found:
+        return found
+
+    search_roots = [
+        Path(r"C:\Program Files (x86)\RivaTuner Statistics Server"),
+        Path(r"C:\Program Files\RivaTuner Statistics Server"),
+    ]
+    for root in search_roots:
+        candidate = root / "RTSS.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def is_rtss_running():
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info.get("name") or "").lower() == "rtss.exe":
+                return True
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return False
+
+
+def start_rtss_if_available(rtss_path):
+    if not rtss_path or is_rtss_running():
+        return bool(rtss_path)
+    try:
+        subprocess.Popen(
+            [rtss_path],
+            cwd=str(Path(rtss_path).resolve().parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        log_event(f"Started RTSS: {rtss_path}")
+        return True
+    except Exception as e:
+        log_event(f"RTSS start failed: {e}", e)
+        return False
 
 
 # ====================== SMART ======================
@@ -1155,6 +1326,8 @@ class Monitor(QWidget):
         self.last_process_refresh = 0
         self.frame_tick_count = 0
         self.frame_rate_last_time = time.time()
+        self.rtss_path = find_rtss_executable()
+        self.rtss_start_failed = bool(self.rtss_path) and not start_rtss_if_available(self.rtss_path)
         self.presentmon_path = find_presentmon_executable()
         self.presentmon_worker = None
         self.presentmon_workers = []
@@ -1710,6 +1883,11 @@ class Monitor(QWidget):
     def update_frame_rate(self, now=None):
         now = now or time.time()
         self.frame_tick_count += 1
+
+        rtss_reading = read_rtss_fps() if getattr(self, "rtss_path", None) else None
+        if rtss_reading:
+            self.game_fps_reading = rtss_reading
+
         if self.presentmon_path and now - self.last_presentmon_refresh >= PRESENTMON_REFRESH_SECONDS:
             self.refresh_presentmon_fps()
             self.last_presentmon_refresh = now
@@ -1721,7 +1899,48 @@ class Monitor(QWidget):
         fps = self.frame_tick_count / elapsed
         self.frame_tick_count = 0
         self.frame_rate_last_time = now
+
+        if rtss_reading:
+            game_fps = rtss_reading["fps"]
+            self.frame_rate.set_data(
+                frame_rate_percent(game_fps, target_fps=120),
+                f"{game_fps:.0f} FPS",
+                rtss_reading["application"],
+                "Game FPS",
+                "RTSS"
+            )
+            return
+
+        if self.rtss_path and self.game_fps_reading and self.game_fps_reading.get("source") == "RTSS":
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                "Waiting for game",
+                "RTSS",
+                ""
+            )
+            return
+
+        if self.rtss_path and self.rtss_start_failed:
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                "Start RTSS",
+                "Run as admin",
+                ""
+            )
+            return
+
         if self.game_fps_reading and self.game_fps_reading.get("error"):
+            if self.rtss_path:
+                self.frame_rate.set_data(
+                    0,
+                    "-- FPS",
+                    "Waiting for game",
+                    "RTSS",
+                    ""
+                )
+                return
             self.frame_rate.set_data(
                 0,
                 "-- FPS",

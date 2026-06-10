@@ -1,4 +1,5 @@
 import sys
+import struct
 import unittest
 from pathlib import Path
 
@@ -10,8 +11,38 @@ from monitor import (
     gauge_color_rgb,
     gauge_history_color_rgb,
     parse_presentmon_fps,
+    parse_rtss_fps_snapshot,
     presentmon_failure_message,
 )
+
+
+RTSS_SIGNATURE = struct.unpack("<I", b"RTSS")[0]
+
+
+def make_rtss_snapshot(entries, foreground_index=0):
+    entry_size = 288
+    app_offset = 128
+    app_count = max(len(entries), 4)
+    data = bytearray(app_offset + (entry_size * app_count))
+    struct.pack_into("<IIIII", data, 0, RTSS_SIGNATURE, 0x00020010, entry_size, app_offset, app_count)
+    struct.pack_into("<I", data, 64, foreground_index)
+
+    for index, entry in enumerate(entries):
+        offset = app_offset + (entry_size * index)
+        name = entry["name"].encode("mbcs", errors="ignore")[:259]
+        struct.pack_into("<I", data, offset, entry.get("pid", index + 1000))
+        data[offset + 4:offset + 4 + len(name)] = name
+        struct.pack_into(
+            "<IIII",
+            data,
+            offset + 268,
+            entry.get("time0", 1000),
+            entry.get("time1", 2000),
+            entry.get("frames", 60),
+            entry.get("frame_time", 0),
+        )
+
+    return bytes(data)
 
 
 class FrameRateGaugeTests(unittest.TestCase):
@@ -57,6 +88,36 @@ class FrameRateGaugeTests(unittest.TestCase):
 
         self.assertIsNone(parse_presentmon_fps(csv_text))
 
+    def test_parse_rtss_fps_snapshot_uses_foreground_app(self):
+        snapshot = make_rtss_snapshot([
+            {"name": "OldGame.exe", "time0": 1000, "time1": 2000, "frames": 30},
+            {"name": "CoolGame.exe", "time0": 1000, "time1": 2000, "frames": 144},
+        ], foreground_index=1)
+
+        reading = parse_rtss_fps_snapshot(snapshot)
+
+        self.assertEqual(reading["application"], "CoolGame.exe")
+        self.assertAlmostEqual(reading["fps"], 144.0, places=1)
+        self.assertEqual(reading["source"], "RTSS")
+
+    def test_parse_rtss_fps_snapshot_falls_back_to_frame_time(self):
+        snapshot = make_rtss_snapshot([
+            {"name": "CoolGame.exe", "time0": 0, "time1": 0, "frames": 0, "frame_time": 16667},
+        ])
+
+        reading = parse_rtss_fps_snapshot(snapshot)
+
+        self.assertEqual(reading["application"], "CoolGame.exe")
+        self.assertAlmostEqual(reading["fps"], 60.0, places=1)
+
+    def test_parse_rtss_fps_snapshot_returns_none_without_valid_app(self):
+        snapshot = make_rtss_snapshot([
+            {"name": "SystemGauges.exe", "time0": 1000, "time1": 2000, "frames": 60},
+            {"name": "CoolGame.exe", "time0": 2000, "time1": 1000, "frames": 60},
+        ])
+
+        self.assertIsNone(parse_rtss_fps_snapshot(snapshot))
+
     def test_presentmon_failure_message_explains_access_denied(self):
         output = "error: failed to start trace session: access denied."
 
@@ -87,6 +148,8 @@ class FrameRateGaugeTests(unittest.TestCase):
         self.assertIn("self.frame_rate", source)
         self.assertIn("update_frame_rate", source)
         self.assertIn("PresentMon", source)
+        self.assertIn("RTSS", source)
+        self.assertIn("RTSSSharedMemoryV2", source)
         self.assertIn("PresentMonWorker", source)
         self.assertIn("find_presentmon_executable", source)
         self.assertIn("PresentMonConsoleApplication", source)

@@ -106,6 +106,20 @@ python tools\verify_fps_capture.py
 
 The verifier launches `dist\FpsWireTest.exe` when it exists, otherwise it runs `tools\fps_wire_test.py` with Python. If PresentMon reports `Needs admin or PerfLog`, run System Gauges elevated or add your Windows user to the `Performance Log Users` group, then sign out and back in.
 
+RTSS is the preferred FPS source when installed. Install it with:
+
+```powershell
+winget install --id Guru3D.RTSS --exact
+```
+
+Start RTSS as administrator, then verify the shared-memory capture path:
+
+```powershell
+python tools\verify_rtss_fps.py
+```
+
+When RTSS is installed, the FPS gauge uses RTSS first, PresentMon second, and the app's own UI render rate only as a fallback.
+
 ## Release
 
 The repository includes a GitHub Actions workflow that builds `SystemGauges.exe` on Windows.
