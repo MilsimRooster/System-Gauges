@@ -64,6 +64,7 @@ class FrameRateGaugeTests(unittest.TestCase):
         self.assertIn("PresentMon", source)
         self.assertIn("PresentMonWorker", source)
         self.assertIn("find_presentmon_executable", source)
+        self.assertIn("PresentMonConsoleApplication", source)
         self.assertIn('"Game FPS"', source)
         self.assertIn('"UI render"', source)
         self.assertNotIn('"Game FPS later"', source)

@@ -403,6 +403,8 @@ def find_presentmon_executable():
         app_dir,
         app_dir / "tools",
         app_dir / "PresentMon",
+        Path(r"C:\Program Files\Intel\PresentMon\PresentMonConsoleApplication"),
+        Path(r"C:\Program Files\Intel\PresentMon\PresentMonApplication"),
     ]
     for root in search_roots:
         for exe_name in PRESENTMON_EXE_NAMES:
