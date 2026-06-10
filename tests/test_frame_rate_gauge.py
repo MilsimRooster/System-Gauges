@@ -16,7 +16,7 @@ from monitor import (
 )
 
 
-RTSS_SIGNATURE = struct.unpack("<I", b"RTSS")[0]
+RTSS_SIGNATURE = struct.unpack("<I", b"SSTR")[0]
 
 
 def make_rtss_snapshot(entries, foreground_index=0):
