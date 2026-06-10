@@ -62,6 +62,7 @@ FRAME_RATE_UPDATE_SECONDS = 0.75
 PRESENTMON_REFRESH_SECONDS = 5
 PRESENTMON_SAMPLE_SECONDS = 1.25
 PRESENTMON_EXE_NAMES = ("PresentMon.exe", "PresentMon-2.3.1-x64.exe")
+NETWORK_TARGET_MBPS = 100
 SMARTCTL_PATH = r"C:\Program Files\smartmontools\bin\smartctl.exe"
 UNKNOWN_SMART = ("?", "N/A")
 SMART_DEBUG = False
@@ -264,6 +265,24 @@ def format_speed(v):
     if kb >= 1:
         return f"{kb:.0f} KB/s"
     return "0 B/s"
+
+
+def format_network_speed(bytes_per_second):
+    bits_per_second = max(0, float(bytes_per_second)) * 8
+    if bits_per_second >= 1_000_000_000:
+        return f"{bits_per_second / 1_000_000_000:.1f} Gbps"
+    if bits_per_second >= 1_000_000:
+        return f"{bits_per_second / 1_000_000:.1f} Mbps"
+    if bits_per_second >= 1_000:
+        return f"{bits_per_second / 1_000:.1f} Kbps"
+    return f"{bits_per_second:.0f} bps"
+
+
+def network_rate_percent(bytes_per_second, target_mbps=NETWORK_TARGET_MBPS):
+    if target_mbps <= 0:
+        return 0
+    target_bytes_per_second = (target_mbps * 1_000_000) / 8
+    return int(max(0, min((bytes_per_second / target_bytes_per_second) * 100, 100)))
 
 
 def format_bytes(value):
@@ -1126,6 +1145,7 @@ class Monitor(QWidget):
         self.game_fps_reading = None
 
         self.last = psutil.disk_io_counters(perdisk=True)
+        self.last_net = psutil.net_io_counters()
         self.last_time = time.time()
 
         disk_counters = psutil.disk_io_counters(perdisk=True)
@@ -1198,6 +1218,7 @@ class Monitor(QWidget):
         top_grid.setColumnStretch(1, 1)
         top_grid.setColumnStretch(2, 1)
         top_grid.setColumnStretch(3, 1)
+        top_grid.setColumnStretch(4, 1)
         drive_grid.setHorizontalSpacing(8)
         drive_grid.setVerticalSpacing(4)
 
@@ -1205,11 +1226,13 @@ class Monitor(QWidget):
         self.ram = Gauge("RAM", preferred_size=250, minimum_size=80)
         self.cpu = Gauge("CPU", preferred_size=250, minimum_size=80)
         self.frame_rate = Gauge("FPS", preferred_size=250, minimum_size=80, high_is_good=True)
+        self.network = Gauge("NET", preferred_size=250, minimum_size=80)
 
         top_grid.addWidget(self.gpu, 0, 0)
         top_grid.addWidget(self.cpu, 0, 1)
         top_grid.addWidget(self.ram, 0, 2)
         top_grid.addWidget(self.frame_rate, 0, 3)
+        top_grid.addWidget(self.network, 0, 4)
 
         container_layout.addLayout(top_grid, 3)
 
@@ -1375,6 +1398,8 @@ class Monitor(QWidget):
             self.gpu.background_is_image = is_image
             self.ram.background_is_image = is_image
             self.cpu.background_is_image = is_image
+            self.frame_rate.background_is_image = is_image
+            self.network.background_is_image = is_image
             for gauge in self.disk_gauges.values():
                 gauge.background_is_image = is_image
         if hasattr(self, "skin_actions"):
@@ -1508,6 +1533,7 @@ class Monitor(QWidget):
         self.ram.display_mode = self.display_mode
         self.cpu.display_mode = self.display_mode
         self.frame_rate.display_mode = self.display_mode
+        self.network.display_mode = self.display_mode
         for g in self.disk_gauges.values():
             g.display_mode = self.display_mode
 
@@ -1659,6 +1685,7 @@ class Monitor(QWidget):
         self.ram.tick()
         self.cpu.tick()
         self.frame_rate.tick()
+        self.network.tick()
         for g in self.disk_gauges.values():
             g.tick()
         self.update_frame_rate()
@@ -1769,12 +1796,29 @@ class Monitor(QWidget):
         except:
             pass
 
-        # Disks
+        # Network and disks
         try:
             now = time.time()
-            dt = now - self.last_time
+            dt = max(now - self.last_time, 0.001)
             self.last_time = now
             cur = psutil.disk_io_counters(perdisk=True)
+            net_cur = psutil.net_io_counters()
+
+            try:
+                down = max(0, (net_cur.bytes_recv - self.last_net.bytes_recv) / dt)
+                up = max(0, (net_cur.bytes_sent - self.last_net.bytes_sent) / dt)
+                total_net = down + up
+                self.network.set_data(
+                    network_rate_percent(total_net),
+                    format_network_speed(total_net),
+                    f"Down {format_network_speed(down)}",
+                    f"Up {format_network_speed(up)}",
+                    ""
+                )
+                self.last_net = net_cur
+            except Exception as e:
+                log_event(f"Network update failed: {e}", e)
+                self.network.set_data(0, "NET Error", "", "", "")
 
             if now - self.last_smart > SMART_REFRESH_SECONDS:
                 self.refresh_smart()
