@@ -10,6 +10,7 @@ from monitor import (
     gauge_color_rgb,
     gauge_history_color_rgb,
     parse_presentmon_fps,
+    presentmon_failure_message,
 )
 
 
@@ -54,6 +55,11 @@ class FrameRateGaugeTests(unittest.TestCase):
         ])
 
         self.assertIsNone(parse_presentmon_fps(csv_text))
+
+    def test_presentmon_failure_message_explains_access_denied(self):
+        output = "error: failed to start trace session: access denied."
+
+        self.assertEqual(presentmon_failure_message(output), "Needs admin or PerfLog")
 
     def test_monitor_source_wires_frame_rate_gauge(self):
         source = (Path(__file__).resolve().parents[1] / "monitor.py").read_text(encoding="utf-8")

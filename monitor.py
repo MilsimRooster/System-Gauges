@@ -411,6 +411,15 @@ def parse_presentmon_fps(csv_text):
     }
 
 
+def presentmon_failure_message(output):
+    text = (output or "").lower()
+    if "access denied" in text or "elevated privilege" in text or "performance log users" in text:
+        return "Needs admin or PerfLog"
+    if "failed to start trace session" in text:
+        return "PresentMon trace failed"
+    return "No game frames"
+
+
 def find_presentmon_executable():
     for exe_name in PRESENTMON_EXE_NAMES:
         found = shutil.which(exe_name)
@@ -623,20 +632,22 @@ class PresentMonWorker(QThread):
                 str(PRESENTMON_SAMPLE_SECONDS),
                 "--terminate_after_timed",
             ]
-            subprocess.run(
+            result = subprocess.run(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 timeout=PRESENTMON_SAMPLE_SECONDS + 4,
             )
             if output_file.exists():
-                self.result_ready.emit(parse_presentmon_fps(output_file.read_text(encoding="utf-8", errors="ignore")))
+                reading = parse_presentmon_fps(output_file.read_text(encoding="utf-8", errors="ignore"))
+                self.result_ready.emit(reading or {"error": presentmon_failure_message((result.stdout or "") + (result.stderr or ""))})
             else:
-                self.result_ready.emit(None)
+                self.result_ready.emit({"error": presentmon_failure_message((result.stdout or "") + (result.stderr or ""))})
         except Exception as e:
             log_event(f"PresentMon sample failed: {e}", e)
-            self.result_ready.emit(None)
+            self.result_ready.emit({"error": "PresentMon error"})
         finally:
             try:
                 output_file.unlink(missing_ok=True)
@@ -1704,6 +1715,16 @@ class Monitor(QWidget):
         fps = self.frame_tick_count / elapsed
         self.frame_tick_count = 0
         self.frame_rate_last_time = now
+        if self.game_fps_reading and self.game_fps_reading.get("error"):
+            self.frame_rate.set_data(
+                0,
+                "-- FPS",
+                self.game_fps_reading["error"],
+                "PresentMon",
+                ""
+            )
+            return
+
         if self.game_fps_reading:
             game_fps = self.game_fps_reading["fps"]
             self.frame_rate.set_data(

@@ -96,6 +96,16 @@ python -m PyInstaller --onefile --windowed --name SystemGauges --icon app.ico --
 
 The finished executable will be created at `dist\SystemGauges.exe`.
 
+## FPS Capture Test
+
+System Gauges includes a small render target for checking the game FPS pipeline:
+
+```powershell
+python tools\verify_fps_capture.py
+```
+
+The verifier launches `dist\FpsWireTest.exe` when it exists, otherwise it runs `tools\fps_wire_test.py` with Python. If PresentMon reports `Needs admin or PerfLog`, run System Gauges elevated or add your Windows user to the `Performance Log Users` group, then sign out and back in.
+
 ## Release
 
 The repository includes a GitHub Actions workflow that builds `SystemGauges.exe` on Windows.
